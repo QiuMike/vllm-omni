@@ -13,6 +13,12 @@ from vllm_omni.plugins import load_omni_general_plugins
 logger = init_logger(__name__)
 
 
+# NOTE: Architecture strings whose HF configs are implemented locally in vllm-omni.
+#       Used for situations that HF config applies auto_map but configuration/
+#       files are not present in the HF repo.
+_ARCHS_WITH_LOCAL_HF_CONFIG: set[str] = set()
+
+
 def _register_omni_hf_configs() -> None:
     try:
         from transformers import AutoConfig
@@ -141,20 +147,11 @@ class OmniEngineArgs(EngineArgs):
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
 
-        # NOTE: Some models (e.g. Ming-flash-omni) ship a config.json whose auto_map
-        # points to a remote Python file that does not exist in the HF repo.
-        # transformers prioritises auto_map over CONFIG_MAPPING when trust_remote_code=True,
-        # which causes an OSError during get_config(), as specific file cannot be found.
-        # For these models we registered the local config classes via
-        # AutoConfig.register() in _register_omni_hf_configs().
-        # Passing trust_remote_code=False to OmniModelConfig forces AutoConfig to fall
-        # through to CONFIG_MAPPING (our local class) instead of fetching the
-        # missing remote file. The real value is restored on the config object
-        # right after construction so the rest of the engine is unaffected.
-        _ARCHS_WITH_LOCAL_HF_CONFIG = {
-            "MingFlashOmniForConditionalGeneration",
-            "MingFlashOmniThinkerForConditionalGeneration",
-        }
+        # NOTE: Models with auto_map pointing to a missing remote file fail when
+        # trust_remote_code=True (as transformers prefers auto_map over CONFIG_MAPPING).
+        # Using trust_remote_code=False forces fallback to CONFIG_MAPPING
+        # where our local class is registered.
+        # Restored after construction so the rest of the engine is unaffected.
         effective_trust_remote_code = (
             False
             if self.model_arch in _ARCHS_WITH_LOCAL_HF_CONFIG and self.trust_remote_code
