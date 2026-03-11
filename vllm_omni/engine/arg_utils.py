@@ -13,12 +13,6 @@ from vllm_omni.plugins import load_omni_general_plugins
 logger = init_logger(__name__)
 
 
-# NOTE: Architecture strings whose HF configs are implemented locally in vllm-omni.
-#       Used for situations that HF config applies auto_map but configuration/
-#       files are not present in the HF repo.
-_ARCHS_WITH_LOCAL_HF_CONFIG: set[str] = set()
-
-
 def _register_omni_hf_configs() -> None:
     try:
         from transformers import AutoConfig
@@ -147,17 +141,6 @@ class OmniEngineArgs(EngineArgs):
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
 
-        # NOTE: Models with auto_map pointing to a missing remote file fail when
-        # trust_remote_code=True (as transformers prefers auto_map over CONFIG_MAPPING).
-        # Using trust_remote_code=False forces fallback to CONFIG_MAPPING
-        # where our local class is registered.
-        # Restored after construction so the rest of the engine is unaffected.
-        effective_trust_remote_code = (
-            False
-            if self.model_arch in _ARCHS_WITH_LOCAL_HF_CONFIG and self.trust_remote_code
-            else self.trust_remote_code
-        )
-
         # Keep compatibility when async args are constructed from partial payloads.
         limit_mm_per_prompt = getattr(self, "limit_mm_per_prompt", {})
         language_model_only = getattr(self, "language_model_only", False)
@@ -192,7 +175,7 @@ class OmniEngineArgs(EngineArgs):
             convert=self.convert,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
-            trust_remote_code=effective_trust_remote_code,
+            trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             allowed_media_domains=self.allowed_media_domains,
             dtype=self.dtype,
@@ -251,8 +234,6 @@ class OmniEngineArgs(EngineArgs):
             task_type=self.task_type,
         )
         omni_config.hf_config.architectures = omni_config.architectures
-        # Restore real trust_remote_code so the rest of the engine is unaffected.
-        omni_config.trust_remote_code = self.trust_remote_code
 
         return omni_config
 
