@@ -688,10 +688,8 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
 
         self.router_type = self.config.router_type
         if self.router_type == "topN":
-            logger.info("Using topN Router")
             self.gate = BailingMoeV2Gate(self.config, quant_config, prefix=f"{prefix}.gate")
         elif self.router_type == "MultiRouter":
-            logger.info("Using MultiRouter")
             self.gate = BailingMoeV2Gate(self.config, quant_config, prefix=f"{prefix}.gate")
             self.image_gate = BailingMoeV2Gate(self.config, quant_config, prefix=f"{prefix}.image_gate")
             self.audio_gate = BailingMoeV2Gate(self.config, quant_config, prefix=f"{prefix}.audio_gate")

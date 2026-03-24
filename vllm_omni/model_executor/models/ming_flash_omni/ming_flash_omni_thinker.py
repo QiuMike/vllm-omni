@@ -394,7 +394,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         Defines how each multimodal field should be sliced into per-item chunks.
         Qwen2VL-style image processing concatenates patches from all images into a
-        flat tensor, so pixel_values must use ``flat_from_sizes`` (not ``batched``).
+        flat tensor, so we use `flat_from_sizes` for pixel_values.
 
         Args:
             hf_inputs: Output from HuggingFace processor.
@@ -437,21 +437,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         if "placeholder_audio_loc_lens" in hf_inputs:
             config["placeholder_audio_loc_lens"] = MultiModalFieldConfig.batched("audio")
 
-        audio_feats_shape = None
-        audio_feats_lengths_val = None
-        if "audio_feats" in hf_inputs:
-            af = hf_inputs["audio_feats"]
-            audio_feats_shape = af.shape if hasattr(af, "shape") else type(af)
-        if "audio_feats_lengths" in hf_inputs:
-            audio_feats_lengths_val = hf_inputs["audio_feats_lengths"]
-        logger.info(
-            "[DIAG _get_mm_fields_config] hf_inputs_keys=%s, "
-            "audio_feats_shape=%s, audio_feats_lengths=%s, config_keys=%s",
-            list(hf_inputs.keys()),
-            audio_feats_shape,
-            audio_feats_lengths_val,
-            list(config.keys()),
-        )
         return config
 
     def _call_hf_processor(
@@ -564,9 +549,8 @@ class MingFlashOmniThinkerForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        # Get the thinker config
+        # Get the thinker config (BailingMM2Config)
         config = vllm_config.model_config.hf_config
-        logger.info(f" >>> config: {type(config)}")
 
         if hasattr(config, "llm_config"):
             # If initialized with MingFlashOmniThinkerConfig
@@ -577,8 +561,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
             # If initialized directly with LLM config (from unified model)
             llm_config = config
             thinker_config = None  # type: ignore
-
-        logger.info(f" >>> thinker_config: {type(thinker_config)}; llm_config: {type(llm_config)}")
 
         self.config = llm_config
         self.thinker_config = thinker_config
