@@ -25,6 +25,10 @@ stage_args:
       max_num_batched_tokens: 32768
       tensor_parallel_size: 4  # Use 4 GPUs for MoE model
       hf_config_name: llm_config
+      # profiler usage
+      # profiler_config:
+      #   profiler: torch
+      #   torch_profiler_dir: ./perf
     final_output: true  # Can output text directly
     final_output_type: text
     is_comprehension: true

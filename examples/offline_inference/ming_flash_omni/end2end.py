@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Offline inference example for Ming-flash-omni 2.0 (Thinker stage).
-"""
-
 import os
+import time
 from typing import NamedTuple
 
 import librosa
 import numpy as np
+import vllm
 from PIL import Image
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
@@ -17,11 +15,12 @@ from vllm.assets.video import VideoAsset, video_to_ndarrays
 from vllm.multimodal.image import convert_image_mode
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+import vllm_omni
 from vllm_omni.entrypoints.omni import Omni
 
 SEED = 42
 
-# ── Ming chat-template constants ──────────────────────────────────────────────
+# Ming's settings from https://github.com/inclusionAI/Ming
 SYSTEM_PROMPT_NOTHINK = "你是一个友好的AI助手。\n\ndetailed thinking off"
 SYSTEM_PROMPT_THINK = "你是一个友好的AI助手。\n\ndetailed thinking on"
 EOS_TOKEN = "<|role_end|>"
@@ -42,7 +41,7 @@ def build_prompt(user_text: str, think: bool = False) -> str:
     return f"<role>SYSTEM</role>{system}{EOS_TOKEN}<role>HUMAN</role>{user_text}{EOS_TOKEN}<role>ASSISTANT</role>"
 
 
-def get_text_query(question: str = None) -> QueryResult:
+def get_text_query(question: str | None = None) -> QueryResult:
     if question is None:
         question = "请详细介绍鹦鹉的生活习性。"
     return QueryResult(
@@ -52,7 +51,7 @@ def get_text_query(question: str = None) -> QueryResult:
 
 
 def get_image_query(
-    question: str = None,
+    question: str | None = None,
     image_path: str | None = None,
 ) -> QueryResult:
     if question is None:
@@ -76,7 +75,7 @@ def get_image_query(
 
 
 def get_audio_query(
-    question: str = None,
+    question: str | None = None,
     audio_path: str | None = None,
     sampling_rate: int = 16000,
 ) -> QueryResult:
@@ -102,7 +101,7 @@ def get_audio_query(
 
 
 def get_video_query(
-    question: str = None,
+    question: str | None = None,
     video_path: str | None = None,
     num_frames: int = 16,
 ) -> QueryResult:
@@ -160,7 +159,7 @@ def get_mixed_modalities_query(
 
 
 def get_reasoning_query(
-    question: str = None,
+    question: str | None = None,
     image_path: str | None = None,
 ) -> QueryResult:
     if question is None:
@@ -199,6 +198,14 @@ query_map = {
 
 def main(args):
     model_name = "Jonathan1909/Ming-flash-omni-2.0"
+    print(
+        "=" * 20,
+        "\n",
+        f"vllm version: {vllm.__version__}\n",
+        f"vllm-omni version: {vllm_omni.__version__}\n",
+        "=" * 20,
+        sep="",
+    )
 
     query_func = query_map[args.query_type]
     if args.query_type == "use_image":
@@ -223,11 +230,12 @@ def main(args):
         model=model_name,
         stage_configs_path=args.stage_configs_path,
         log_stats=args.log_stats,
+        init_timeout=args.init_timeout,
         stage_init_timeout=args.stage_init_timeout,
     )
 
     # Thinker sampling params
-    sampling_params = SamplingParams(
+    thinker_sampling_params = SamplingParams(
         temperature=0.4,
         top_p=0.9,
         max_tokens=args.max_tokens,
@@ -235,6 +243,7 @@ def main(args):
         seed=SEED,
         detokenize=True,
     )
+    sampling_params_list = [thinker_sampling_params]
 
     prompts = [query_result.inputs for _ in range(args.num_prompts)]
 
@@ -243,28 +252,51 @@ def main(args):
         for prompt in prompts:
             prompt["modalities"] = output_modalities
 
+    total_requests = len(prompts)
+    processed_count = 0
     print(f"Query type: {args.query_type}")
-    print(f"Number of prompts: {len(prompts)}")
-    print("-" * 60)
+    print(f"Number of prompts: {total_requests}")
 
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    for stage_outputs in omni.generate(prompts, [sampling_params]):
-        if stage_outputs.final_output_type == "text":
-            for output in stage_outputs.request_output:
-                request_id = output.request_id
-                text_output = output.outputs[0].text
-                print(f"\n[Request {request_id}]")
-                print(f"Prompt: {output.prompt!r}")
-                print(f"Output: {text_output}")
+    profiler_enabled = args.enable_profiler
+    if profiler_enabled:
+        omni.start_profile(stages=args.profiler_stages)
 
-                # Save to file
-                out_txt = os.path.join(output_dir, f"{request_id}.txt")
+    for stage_outputs in omni.generate(prompts, sampling_params_list):
+        output = stage_outputs.request_output
+        if stage_outputs.final_output_type == "text":
+            request_id = output.request_id
+            text_output = output.outputs[0].text
+            lines = []
+            lines.append("Prompt:\n")
+            lines.append(str(output.prompt) + "\n")
+            lines.append("Text Output:\n")
+            lines.append(str(text_output).strip() + "\n")
+            print(*lines, sep="")
+
+            # Save to file
+            out_txt = os.path.join(output_dir, f"{request_id}.txt")
+            try:
                 with open(out_txt, "w", encoding="utf-8") as f:
-                    f.write(f"Prompt:\n{output.prompt}\n\n")
-                    f.write(f"Output:\n{text_output.strip()}\n")
-                print(f"Saved to {out_txt}")
+                    f.writelines(lines)
+                print(f"Request ID: {request_id}, text saved to {out_txt}")
+            except Exception as e:
+                print(f"Failed to write output file {out_txt}: {e}")
+
+        elif stage_outputs.final_output_type == "audio":
+            raise NotImplementedError("Add audio example after talker supported.")
+
+        processed_count += 1
+        if profiler_enabled and processed_count >= total_requests:
+            print(f"[Info] Processed {processed_count}/{total_requests}. Stopping profiler inside active loop...")
+            # Stop the profiler while workers are still alive
+            omni.stop_profile(stages=args.profiler_stages)
+
+            print("[Info] Waiting 30s for workers to write trace files to disk...")
+            time.sleep(30)
+            print("[Info] Trace export wait time finished.")
 
     omni.close()
 
@@ -291,11 +323,25 @@ def parse_args():
         default=False,
         help="Enable detailed statistics logging.",
     )
+    parser.add_argument("--init-timeout", type=int, default=2000, help="Timeout for initializing in seconds.")
     parser.add_argument(
         "--stage-init-timeout",
         type=int,
-        default=300,
+        default=2000,
         help="Timeout for initializing a single stage in seconds.",
+    )
+    parser.add_argument(
+        "--enable-profiler",
+        action="store_true",
+        default=False,
+        help="Enables profiling when set.",
+    )
+    parser.add_argument(
+        "--profiler-stages",
+        type=int,
+        nargs="*",
+        default=[0],
+        help="List of stage IDs to profile. If not set, profiles all stages.",
     )
     parser.add_argument(
         "--image-path",
