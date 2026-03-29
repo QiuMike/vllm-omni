@@ -48,7 +48,6 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
-    BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -74,14 +73,8 @@ from .vision_encoder import MingVisionEncoder
 logger = init_logger(__name__)
 
 
-# === Multimodal Processor Classes === #
-
-
-class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
-    """Processing info for Ming-flash-omni Thinker stage.
-
-    Ming uses the same `Qwen2VLImageProcessor` for vision
-    """
+class MingFlashOmniThinkerProcessingInfo(Qwen2VLProcessingInfo):
+    """Processing info for Ming-flash-omni Thinker stage."""
 
     def get_hf_config(self) -> BailingMM2Config:
         """Get the HuggingFace configuration for Ming-flash-omni Thinker."""
@@ -98,30 +91,8 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
         """
         return 1
 
-    def get_image_processor(self, **kwargs: object):
-        """Return the Qwen2VL-compatible image processor."""
-        return self.get_hf_processor(**kwargs).image_processor
-
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None, "audio": None}
-
-    def _get_vl_max_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        """Delegate vision token-count math to Qwen2VLProcessingInfo.
-
-        Ming shares the same Qwen2VL image processor and ViT patch/merge
-        parameters, so the token-count calculation is identical.
-        We call the Qwen2VL methods as unbound on `self`, which provides
-        the required `get_hf_config()` and `get_image_processor()`.
-        """
-        return Qwen2VLProcessingInfo.get_mm_max_tokens_per_item(
-            self,  # type: ignore[arg-type]
-            seq_len=seq_len,
-            mm_counts=mm_counts,
-        )
 
     def get_mm_max_tokens_per_item(
         self,
@@ -133,7 +104,10 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
         mm_max_tokens: dict[str, int] = {}
 
         if requested_modalities & {"image", "video"}:
-            vl_tokens = self._get_vl_max_tokens(seq_len=seq_len, mm_counts=mm_counts)
+            vl_tokens = super().get_mm_max_tokens_per_item(
+                seq_len=seq_len,
+                mm_counts=mm_counts,
+            )
             mm_max_tokens.update({m: vl_tokens[m] for m in ["image", "video"] if m in requested_modalities})
 
         if "audio" in requested_modalities:
