@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
+# Copyright 2024 ANT Group and the HuggingFace Inc. team.
 # Adapted from Ming repository modeling_whisper_encoder.py
 # https://github.com/inclusionAI/Ming
 
@@ -185,7 +186,7 @@ class WhisperAudioEncoder(nn.Module):
     """Whisper audio encoder for Ming with packed sequence support.
 
     Adapted from
-    whisper/model.py
+    https://github.com/openai/whisper/blob/v20250625/whisper/model.py
     vllm_omni/model_executor/models/qwen3_tts/tokenizer_25hz/vq/whisper_encoder.py
     """
 

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
 # Copyright 2024 ANT Group and the HuggingFace Inc. team.
+# Adapted from Ming repository modeling_bailingmm2.py and processing_bailingmm2.py
+# https://github.com/inclusionAI/Ming
 
 """Ming-flash-omni-2.0 Thinker stage implementation (multimodal understanding)."""
 
@@ -111,7 +113,7 @@ class MingFlashOmniThinkerProcessingInfo(Qwen2VLProcessingInfo):
             mm_max_tokens.update({m: vl_tokens[m] for m in ["image", "video"] if m in requested_modalities})
 
         if "audio" in requested_modalities:
-            # TODO: compute from audio config instead of hardcoding
+            # TODO: consider computing from audio config
             mm_max_tokens["audio"] = 3000
 
         return mm_max_tokens
@@ -165,15 +167,7 @@ class MingFlashOmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[MingFlashOmn
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        """Generate dummy multimodal data for profiling.
-
-        Args:
-            seq_len: Sequence length.
-            mm_counts: Dict with counts for each modality.
-
-        Returns:
-            Dict with dummy image, video, and audio data.
-        """
+        """Generate dummy multimodal data for profiling."""
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
         num_audios = mm_counts.get("audio", 0)
@@ -208,8 +202,8 @@ class MingFlashOmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[MingFlashOmn
 class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashOmniThinkerProcessingInfo]):
     """Multimodal processor for Ming-flash-omni Thinker stage.
 
-    Handles preprocessing of image, video, and audio inputs, and expands
-    placeholder tokens to the correct number of patch tokens.
+    Handles preprocessing of 1) image, 2) video, and 3) audio inputs,
+    and expands placeholder tokens to the correct number of patch tokens.
     """
 
     def _get_prompt_updates(
@@ -220,8 +214,8 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
     ) -> Sequence[PromptUpdate]:
         """Generate prompt updates for multimodal placeholders.
 
-        This method defines how placeholder tokens (e.g., <IMAGE>, <VIDEO>, <AUDIO>)
-        are replaced with the actual patch tokens based on the processed multimodal data.
+        Defines how placeholder tokens are replaced with the actual
+        patch tokens based on the processed multimodal data.
         Only patch tokens (<imagePatch>, <framePatch>, <audioPatch>) receive multimodal
         embeddings; delimiter tokens (<image>, </image>, etc.) use regular text embeddings.
 
@@ -238,6 +232,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         vocab = tokenizer.get_vocab()
 
         # Low-level patch/delimiter token IDs (used in replacement sequences)
+        # TODO: remove manual resolution after HF model repo config.json is updated
         image_start_token = vocab.get("<image>", vocab.get("<|image|>", None))
         image_patch_token = vocab.get("<imagePatch>", None)
         image_end_token = vocab.get("</image>", vocab.get("<|/image|>", None))
@@ -250,7 +245,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         audio_patch_token = vocab.get("<audioPatch>", None)
         audio_end_token = vocab.get("</audio>", vocab.get("<|/audio|>", None))
 
-        # Get config for spatial merge size
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
         spatial_merge_size = vision_config.spatial_merge_size if vision_config else 2
@@ -339,10 +333,9 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                 return PromptUpdateDetails.select_token_id(tokens, audio_patch_token)
             return PromptUpdateDetails.from_seq(tokens)
 
-        # Build prompt updates
+        # Build prompt updates and process replacement
         updates: list[PromptUpdate] = []
 
-        # Image replacement
         if "image" in mm_items and mm_items.get_items("image", ImageProcessorItems):
             updates.append(
                 PromptReplacement(
@@ -351,8 +344,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                     replacement=get_replacement_image,
                 )
             )
-
-        # Video replacement
         if "video" in mm_items and mm_items.get_items("video", VideoProcessorItems):
             updates.append(
                 PromptReplacement(
@@ -361,8 +352,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                     replacement=get_replacement_video,
                 )
             )
-
-        # Audio replacement
         if "audio" in mm_items and mm_items.get_items("audio", AudioProcessorItems):
             updates.append(
                 PromptReplacement(
@@ -393,7 +382,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         """
         config: dict[str, MultiModalFieldConfig] = {}
 
-        # Image fields — pixel_values is flat (concatenated patches from all images)
+        # Image fields, pixel_values is flat (concatenated patches from all images)
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
         if "pixel_values" in hf_inputs:
             image_sizes = image_grid_thw.prod(-1)
@@ -404,7 +393,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         if "image_grid_thw" in hf_inputs:
             config["image_grid_thw"] = MultiModalFieldConfig.batched("image")
 
-        # Video fields — same flat layout as images
+        # Video fields, same flat layout as images
         video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
         if "pixel_values_videos" in hf_inputs:
             video_sizes = video_grid_thw.prod(-1)
@@ -446,11 +435,8 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         """Call sub-processors for multimodal inputs and tokenize.
 
         We call the image/audio sub-processors directly (instead of going
-        through ``MingFlashOmniProcessor.__call__``) so that the high-level
-        placeholder tokens (``<IMAGE>``, ``<VIDEO>``, ``<AUDIO>``) remain
-        **unexpanded** in the tokenized output.  vLLM's
-        ``_apply_prompt_updates`` will expand them via the
-        ``PromptReplacement`` objects returned by ``_get_prompt_updates``.
+        through `MingFlashOmniProcessor.__call__`) so that the high-level
+        placeholder tokens remain **unexpanded** in the tokenized output.
 
         Args:
             prompt: Text prompt with placeholders.
@@ -466,7 +452,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         data: dict[str, object] = {}
 
-        # Process images (pixel values + grid_thw only, no text expansion)
         images = mm_data.get("images", None)
         if images is not None and hf_processor.image_processor is not None:
             image_outputs = hf_processor.image_processor(
@@ -476,7 +461,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             )
             data.update(image_outputs)
 
-        # Process videos
         videos = mm_data.get("videos", None)
         if videos is not None and hf_processor.image_processor is not None:
             video_outputs = hf_processor.image_processor(
@@ -491,12 +475,11 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                 video_outputs["video_grid_thw"] = video_outputs.pop("image_grid_thw")
             data.update(video_outputs)
 
-        # Process audio
         audios = mm_data.get("audios", None)
         if audios is not None and hf_processor.audio_processor is not None:
-            # vLLM's AudioProcessorItems provides raw numpy arrays (already
-            # resampled).  MingWhisperAudioProcessor expects (waveform, sr)
-            # tuples, so wrap them with the target sample rate.
+            # vLLM's AudioProcessorItems provides raw numpy arrays (already resampled).
+            # MingWhisperAudioProcessor expects (waveform, sr) tuples,
+            # so wrap them with the target sample rate.
             target_sr = hf_processor.audio_processor.sampling_rate
             audio_tuples = [(a, target_sr) if not isinstance(a, tuple) else a for a in audios]
 
@@ -513,9 +496,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         return BatchFeature(data=data)
 
 
-# === Main Model Class === #
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     MingFlashOmniThinkerMultiModalProcessor,
     info=MingFlashOmniThinkerProcessingInfo,
@@ -529,16 +509,16 @@ class MingFlashOmniThinkerForConditionalGeneration(
     CustomProcessMixin,
 ):
     """
-    Ming Thinker stage: Multimodal understanding → text generation.
+    Ming Thinker stage: Multimodal understanding -> text generation.
 
     Components:
-    - Vision: MingVisionEncoder (wraps Qwen3Omni_VisionTransformer)
-    - Audio: WhisperAudioEncoder (audio inputs)
-    - LLM: BailingMoeV2ForCausalLM (100B total, 6B active MoE)
+    - Vision: MingVisionEncoder
+    - Audio: WhisperAudioEncoder
+    - LLM: BailingMoeV2ForCausalLM
 
-    The Thinker stage processes multimodal inputs (text, image, video, audio) and
-    generates text responses. It also captures intermediate embeddings for potential
-    downstream stages (image generation, audio generation).
+    The Thinker stage processes multimodal inputs (text, image, video, audio)
+    and generates text responses. It also captures intermediate embeddings
+    for downstream stages (image-gen, talker).
 
     Supports Multi-Dimensional RoPE (MRoPE) for 3D position encoding in multimodal contexts.
     """
@@ -552,16 +532,15 @@ class MingFlashOmniThinkerForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        # Get the thinker config (BailingMM2Config)
         config = vllm_config.model_config.hf_config
 
         if hasattr(config, "llm_config"):
-            # If initialized with MingFlashOmniThinkerConfig
+            # if initialized with MingFlashOmniThinkerConfig
             # TODO: Maybe adding a type check / casting
             thinker_config: MingFlashOmniThinkerConfig = config
             llm_config = thinker_config.llm_config
         else:
-            # If initialized directly with LLM config (from unified model)
+            # if initialized directly with LLM config (from unified model)
             llm_config = config
             thinker_config = None  # type: ignore
 
@@ -569,7 +548,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         self.thinker_config = thinker_config
         self.have_multimodal_outputs = True
 
-        # Initialize LLM as a component (not inherit)
+        # Initialize LLM as a component
         llm_vllm_config = vllm_config.with_hf_config(llm_config)
         self.llm = BailingMoeV2ForCausalLM(vllm_config=llm_vllm_config, prefix=maybe_prefix(prefix, "llm"))
 
@@ -609,6 +588,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
             logger.info("Initialized WhisperAudioEncoder and AudioProjector")
 
         # Resolve audio_patch_token from the tokenizer if not already set in the config.
+        # TODO: remove manual resolution after HF model repo config.json is updated
         if self.audio is not None and getattr(llm_config, "audio_patch_token", None) is None:
             from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -625,14 +605,14 @@ class MingFlashOmniThinkerForConditionalGeneration(
                     "Set audio_patch_token in config manually if audio is used."
                 )
 
+        # Expose interfaces
+        self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
+
         logger.info(
             f"MingFlashOmniThinker initialized with: "
             f"vision={'yes' if self.vision else 'no'}, "
             f"audio={'yes' if self.audio else 'no'}"
         )
-
-        # Expose interfaces from LLM
-        self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
 
     def extract_image_feature(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         """Extract and project image features.
@@ -650,10 +630,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             image_embeds = self.vision(pixel_values, grid_thw=grid_thw)
 
-        # When deepstack is enabled, the vision encoder returns concatenated
-        # multi-scale features: [seq_len, out_hidden_size * (1 + num_deepstack)].
-        # The original Ming repo discards deepstack features and only projects
-        # the main features (first out_hidden_size dims) through linear_proj.
         if self.vision.use_deepstack:
             image_embeds = image_embeds[:, : self.vision.image_emb_dim]
 
@@ -699,24 +675,20 @@ class MingFlashOmniThinkerForConditionalGeneration(
                 audio_lens.append(feat_len)
                 feat_index += feat_len
 
-        # Encode audio (returns packed format [total_T', n_state])
         audio_embeds_packed = self.audio(x_list, audio_lens)
 
         # Project audio features
-        # Need to split packed format back into list, project each, then repack
-        # For simplicity, we'll work with the full tensor
-        # TODO: Optimize by keeping packed format through projection
+        # 1) split packed format back into list, 2) project each, then 3) repack
+        # For simplicity, work with the full tensor here
+        # Maybe we want to keep packed format through projection
         audio_embeds_list = []
         offset = 0
         audio_embeds_lengths = []
         for audio_len in audio_lens:
-            # WhisperAudioEncoder: conv1 (stride=1, no length change) +
-            # conv2 (kernel=3, stride=2, padding=1) → (T-1)//2 + 1
             encoded_len = (audio_len - 3 + 2 * 1) // 2 + 1
             audio_segment = audio_embeds_packed[offset : offset + encoded_len]
             offset += encoded_len
 
-            # Project this segment
             audio_segment_proj = self.linear_proj_audio(audio_segment.unsqueeze(0))
             audio_embeds_list.append(audio_segment_proj.squeeze(0))
 
@@ -725,7 +697,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
             audio_embeds_lengths.append(int(final_len))
 
         # Stack into batch format [B, max_T', hidden_size]
-        # Pad to max length
         max_len = max(audio_embeds_lengths)
         audio_embeds = torch.zeros(
             len(audio_embeds_list),
@@ -739,7 +710,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
 
         audio_embeds_lengths = torch.tensor(audio_embeds_lengths, dtype=torch.long, device=audio_embeds.device)
 
-        # Apply L2 normalization if configured
         if (
             self.thinker_config
             and self.thinker_config.audio_config
@@ -784,22 +754,14 @@ class MingFlashOmniThinkerForConditionalGeneration(
         return vision_mask, audio_mask
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        """Encode multimodal inputs and return per-item 2D embedding tensors.
-
-        Called by the vLLM v1 model runner before the forward pass.
-        Returns a tuple of 2D tensors (one per multimodal item) which are then
-        merged into input_ids embeddings via embed_input_ids.
-        """
+        """Encode multimodal inputs and return per-item 2D embedding tensors."""
         embeddings: list[torch.Tensor] = []
 
-        # The vision encoder applies a 2×2 spatial merger, so token count per
-        # image/video is T*H*W // spatial_merge_size².
         spatial_merge_size = 2
         if self.thinker_config and self.thinker_config.vision_config:
             spatial_merge_size = getattr(self.thinker_config.vision_config, "spatial_merge_size", 2)
         spatial_merge_unit = spatial_merge_size**2
 
-        # --- Images ---
         pixel_values: torch.Tensor | None = kwargs.get("pixel_values")  # type: ignore[assignment]
         image_grid_thw: torch.Tensor | None = kwargs.get("image_grid_thw")  # type: ignore[assignment]
         if pixel_values is not None and image_grid_thw is not None and self.vision is not None:
@@ -810,7 +772,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
             for emb in image_embeds.split([int(s) for s in sizes], dim=0):
                 embeddings.append(emb)
 
-        # --- Videos ---
         pixel_values_videos: torch.Tensor | None = kwargs.get("pixel_values_videos")  # type: ignore[assignment]
         video_grid_thw: torch.Tensor | None = kwargs.get("video_grid_thw")  # type: ignore[assignment]
         if pixel_values_videos is not None and video_grid_thw is not None and self.vision is not None:
@@ -819,7 +780,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
             for emb in video_embeds.split([int(s) for s in sizes], dim=0):
                 embeddings.append(emb)
 
-        # --- Audio ---
         audio_feats: torch.Tensor | None = kwargs.get("audio_feats")  # type: ignore[assignment]
         audio_feats_lengths: torch.Tensor | None = kwargs.get("audio_feats_lengths")  # type: ignore[assignment]
         if audio_feats is not None and audio_feats_lengths is not None and self.audio is not None:
@@ -844,7 +804,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        assert is_multimodal is not None, "is_multimodal mask required when multimodal_embeddings provided"
+        assert is_multimodal is not None, "`is_multimodal` mask required when `multimodal_embeddings` provided"
         return _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,
@@ -859,19 +819,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> OmniOutput:
-        """
-        Forward pass with multimodal inputs.
-
-        Args:
-            input_ids: Input token IDs. Must contain original placeholder
-                tokens for MoE mask computation;
-            positions: Token positions (3D for MRoPE)
-            intermediate_tensors: Intermediate tensors from previous pipeline stages
-            inputs_embeds: Pre-computed input embeddings from embed_input_ids
-
-        Returns:
-            OmniOutput with text hidden states and multimodal outputs
-        """
+        """Forward pass with multimodal inputs."""
         if inputs_embeds is not None:
             assert input_ids is not None, (
                 "input_ids required for MoE modality mask computation; "
@@ -926,12 +874,15 @@ class MingFlashOmniThinkerForConditionalGeneration(
         image_grid_thw: list[list[int]] | torch.Tensor | None = None,
         video_grid_thw: list[list[int]] | torch.Tensor | None = None,
         second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, int]:
         """Get MRoPE input positions and delta value for Ming-flash-omni.
 
         Computes 3D position indices (T, H, W) for multimodal inputs including
-        images, videos, and audio, then returns position tensor and position delta.
+        images and videos, then returns position tensor and position delta.
+
+        NOTE: Audio tokens receive standard 1D text positions (same T/H/W values)
+        in Ming's rope scheme.
 
         Args:
             input_tokens: List of input token IDs
@@ -940,7 +891,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
             image_grid_thw: Image grid dimensions [(T, H, W), ...] or tensor of shape (num_images, 3)
             video_grid_thw: Video grid dimensions [(T, H, W), ...] or tensor of shape (num_videos, 3)
             second_per_grid_ts: Seconds per temporal grid for videos
-            audio_feature_lengths: Audio feature sequence lengths
 
         Returns:
             Tuple of (position_ids, mrope_position_delta):
@@ -962,19 +912,17 @@ class MingFlashOmniThinkerForConditionalGeneration(
 
         # Gather multimodal metadata from mm_features if provided
         if mm_features is not None:
-            kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_kwargs = MultiModalFeatureSpec.gather_kwargs(
                 mm_features,
                 {
                     "image_grid_thw",
                     "video_grid_thw",
                     "second_per_grid_ts",
-                    "audio_feature_lengths",
                 },
             )
-            image_grid_thw = kwargs.get("image_grid_thw", image_grid_thw or [])
-            video_grid_thw = kwargs.get("video_grid_thw", video_grid_thw or [])
-            second_per_grid_ts = kwargs.get("second_per_grid_ts", second_per_grid_ts)
-            audio_feature_lengths = kwargs.get("audio_feature_lengths", audio_feature_lengths)
+            image_grid_thw = mm_kwargs.get("image_grid_thw", image_grid_thw or [])
+            video_grid_thw = mm_kwargs.get("video_grid_thw", video_grid_thw or [])
+            second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", second_per_grid_ts)
 
         # Convert to tensors if needed
         if image_grid_thw is not None:

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
+# Copyright 2023 Antgroup and The HuggingFace Inc. team. All rights reserved.
 # Adapted from Ming
 # https://github.com/inclusionAI/Ming/blob/2a0c02ae3130190160c215f89fce7de3005db483/modeling_bailing_moe_v2.py
-# Copyright 2023 Antgroup and The HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its

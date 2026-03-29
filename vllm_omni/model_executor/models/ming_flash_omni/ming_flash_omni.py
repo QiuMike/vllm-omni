@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
 # Copyright 2024 ANT Group and the HuggingFace Inc. team. All rights reserved.
+# Adapted from Ming repository modeling_bailingmm2.py
+# https://github.com/inclusionAI/Ming
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
