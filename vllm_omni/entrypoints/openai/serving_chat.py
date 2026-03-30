@@ -1249,7 +1249,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                             previous_texts[i] += delta_text
 
                         # set the previous values for the next iteration
-                        previous_num_tokens[i] += len(output.token_ids)
+                        previous_num_tokens[i] = len(output.token_ids)
 
                         # if the message delta is None (e.g. because it was a
                         # "control token" for tool calls or the parser otherwise
