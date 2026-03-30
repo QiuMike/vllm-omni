@@ -30,8 +30,6 @@ from vllm.config.cache import CacheConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-
-# vLLM imports
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -443,7 +441,7 @@ class BailingMoeV2Gate(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         logits, _ = self.gate(hidden_states)
 
-        logits = logits.float()  # cast for numerical precision
+        logits = logits.float()
         scores = torch.sigmoid(logits)
 
         scores_for_routing = scores + self.expert_bias
@@ -460,9 +458,8 @@ class BailingMoeV2Gate(nn.Module):
 class _CachedRoutingFn:
     """Stateful callable that returns pre-computed routing results.
 
-    Used as ``custom_routing_function`` for :class:`FusedMoE` so that
-    the multimodal multi-router logic can be computed externally while
-    still leveraging the fused expert kernels.
+    Used as `custom_routing_function` for `FusedMoE` so that
+    the multimodal multi-router logic can be computed externally.
     """
 
     def __init__(self):
@@ -516,9 +513,6 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
-        # Set expert weight mapping so AutoWeightsLoader can dispatch
-        # checkpoint weights (experts.{i}.gate_proj/up_proj/down_proj)
-        # into the fused w13/w2 tensors.
         self.experts.expert_mapping = FusedMoE.make_expert_params_mapping(
             self.experts,
             ckpt_gate_proj_name="gate_proj",
@@ -633,7 +627,6 @@ class BailingMoeV2Attention(nn.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
 
-        # Handle TP
         tp_size = get_tensor_model_parallel_world_size()
         assert self.num_heads % tp_size == 0
         self.num_heads = self.num_heads // tp_size
@@ -643,11 +636,9 @@ class BailingMoeV2Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        # Partial rotary factor
         partial_rotary_factor = config.partial_rotary_factor
         self.rope_dim = int(self.head_dim * partial_rotary_factor)
 
-        # QKV projection
         total_num_heads = config.num_attention_heads
         total_num_kv_heads = config.num_key_value_heads
         self.qkv_proj = QKVParallelLinear(
@@ -660,7 +651,6 @@ class BailingMoeV2Attention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-        # Output projection
         self.dense = RowParallelLinear(
             total_num_heads * self.head_dim,
             self.hidden_size,
@@ -669,8 +659,7 @@ class BailingMoeV2Attention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        # We apply vLLM RMSNorm here rather than BailingMoeV2RMSNorm in the original implementation
-        # to achieve better perf
+        # apply vLLM RMSNorm here rather than BailingMoeV2RMSNorm, diff might exist
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
@@ -733,19 +722,15 @@ class BailingMoeV2Attention(nn.Module):
         Returns:
             Attention output tensor, shape (num_tokens, hidden_size)
         """
-        # QKV projection: [num_tokens, hidden_size] -> [num_tokens, q_size + 2*kv_size]
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # Apply Q/K normalization (per-head)
         num_tokens = q.shape[0]
         q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim)).view(num_tokens, self.q_size)
         k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim)).view(num_tokens, self.kv_size)
 
-        # Apply rotary embeddings
         q, k = self.rotary_emb(positions, q, k)
 
-        # vLLM attention (handles KV cache, paged attention, etc.)
         attn_output = self.attn(q, k, v)
 
         output, _ = self.dense(attn_output)
@@ -815,7 +800,7 @@ class BailingMoeV2DecoderLayer(nn.Module):
             )
             self.is_moe = False
 
-        # apply vLLM RMSNorm to replace BailingMoeV2RMSNorm
+        # apply vLLM RMSNorm to replace BailingMoeV2RMSNorm, diff might exist
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -845,7 +830,6 @@ class BailingMoeV2DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            # pre-norm with fused residual
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.attention(
@@ -853,7 +837,6 @@ class BailingMoeV2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
-        # pre-norm with fused residual
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         if self.is_moe:
@@ -894,7 +877,6 @@ class BailingMoeV2Model(nn.Module):
         self.vocab_size = config.vocab_size
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
 
-        # Embeddings
         if get_pp_group().is_first_rank or (self.tie_word_embeddings and get_pp_group().is_last_rank):
             self.word_embeddings = VocabParallelEmbedding(
                 config.vocab_size,
@@ -905,7 +887,7 @@ class BailingMoeV2Model(nn.Module):
         else:
             self.word_embeddings = PPMissingLayer()
 
-        # Decoder layers with pipeline parallelism support
+        # Decoder layers with later pipeline parallelism support
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: BailingMoeV2DecoderLayer(
@@ -919,7 +901,7 @@ class BailingMoeV2Model(nn.Module):
         )
 
         if get_pp_group().is_last_rank:
-            # apply vLLM RMSNorm to replace BailingMoeV2RMSNorm
+            # apply vLLM RMSNorm to replace BailingMoeV2RMSNorm, diff might exist
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
@@ -962,7 +944,7 @@ class BailingMoeV2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                # XXX: This won't be run through for now, for future PP setups
+                # TODO: won't be run for now, for future PP setups
                 hidden_states = self.word_embeddings(input_ids)
                 image_mask = None
                 audio_mask = None
@@ -975,7 +957,6 @@ class BailingMoeV2Model(nn.Module):
             image_mask = None
             audio_mask = None
 
-        # Pass through decoder layers
         for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, residual = layer(
                 positions,
@@ -1081,15 +1062,9 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from HuggingFace checkpoint."""
-        # Remap HF checkpoint names to vLLM parameter names:
-        # Router gate: HF stores gate weight directly (e.g. audio_gate.weight)
-        #    but vLLM wraps in ReplicatedLinear (audio_gate.gate.weight)
         mapper = WeightsMapper(
             orig_to_new_substr={f".{r}.weight": f".{r}.gate.weight" for r in ("gate", "image_gate", "audio_gate")}
         )
-        # Stacked param remapping (query_key_value → qkv_proj, gate/up_proj →
-        # gate_up_proj) is handled by BailingMoeV2Attention.load_weights and
-        # BailingMoeV2MLP.load_weights respectively, which AutoWeightsLoader
-        # dispatches to automatically.
+
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=mapper)

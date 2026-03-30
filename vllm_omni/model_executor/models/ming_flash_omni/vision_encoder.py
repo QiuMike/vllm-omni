@@ -31,12 +31,8 @@ logger = init_logger(__name__)
 
 
 def _adapt_vision_config(vision_config):
-    """Adapt Ming's Qwen3VLMoeVisionConfig to be compatible with vLLM's
-    Qwen3Omni_VisionTransformer expectations.
-
-    Ming uses ``num_position_embeddings`` (e.g. 2304 = 48^2) while vLLM
-    expects ``image_size`` and ``apply_vit_abs_pos_embed``.
-    """
+    # Adapt Ming's Qwen3VLMoeVisionConfig to be compatible with vLLM's
+    # Qwen3Omni_VisionTransformer expectations.
     if not hasattr(vision_config, "image_size") or vision_config.image_size is None:
         if hasattr(vision_config, "num_position_embeddings") and vision_config.num_position_embeddings:
             import math
@@ -47,21 +43,14 @@ def _adapt_vision_config(vision_config):
             vision_config.image_size = vision_config.patch_size * 14  # fallback
 
     if not hasattr(vision_config, "apply_vit_abs_pos_embed"):
-        # Ming always uses nn.Embedding for pos_embed
         vision_config.apply_vit_abs_pos_embed = True
 
     return vision_config
 
 
 class MingVisionEncoder(nn.Module):
-    """**Wrapper** around vLLM's Qwen3Omni_VisionTransformer for Ming.
+    """**Wrapper** around vLLM's Qwen3Omni_VisionTransformer for Ming."""
 
-    Handles config adaptation and weight name remapping so that Ming's HF
-    checkpoint weights can be loaded directly into vLLM's TP-aware ViT.
-    """
-
-    # Weight name mapping from Ming HF checkpoint names to vLLM parameter names.
-    # Applied during load_weights() to translate checkpoint keys.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "deepstack_merger_list.": "merger_list.",
@@ -104,7 +93,7 @@ class MingVisionEncoder(nn.Module):
         pixel_values: torch.Tensor,
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
-        """Run vision encoder.
+        """forward method of the vision encoder.
 
         Args:
             pixel_values: Flattened pixel values.
@@ -121,9 +110,6 @@ class MingVisionEncoder(nn.Module):
         import re
 
         def _remap_merger_list_inner(name: str) -> str:
-            # merger_list.0.norm.weight -> merger_list.0.ln_q.weight
-            # merger_list.0.linear_fc1.weight -> merger_list.0.mlp.0.weight
-            # merger_list.0.linear_fc2.weight -> merger_list.0.mlp.2.weight
             name = re.sub(r"(merger_list\.\d+)\.norm\.", r"\1.ln_q.", name)
             name = re.sub(r"(merger_list\.\d+)\.linear_fc1\.", r"\1.mlp.0.", name)
             name = re.sub(r"(merger_list\.\d+)\.linear_fc2\.", r"\1.mlp.2.", name)

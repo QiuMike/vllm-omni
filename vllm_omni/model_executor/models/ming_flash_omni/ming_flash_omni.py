@@ -70,14 +70,9 @@ class MingFlashOmniForConditionalGeneration(
     Unified Ming-flash-omni-2.0 model combining thinker, imagegen, and talker.
 
     Architecture:
-    - Thinker (Stage 0): Multimodal understanding (text + image + video + audio) → text generation
-    - Image Generator (Stage 1a): Text embeddings → PIL Image [NOT IMPLEMENTED YET]
-    - Talker (Stage 1b): Text embeddings → Audio waveform (TTS) [NOT IMPLEMENTED YET]
-
-    Usage:
-        Set `model_stage` in vllm_config to one of: "thinker", "imagegen", "talker"
-
-    Supports Multi-Dimensional RoPE (MRoPE) for 3D position encoding in multimodal contexts.
+    - Thinker (Stage 0): Multimodal understanding (text + image + video + audio) -> text generation
+    - Image Generator: Text embeddings -> PIL Image [NOT IMPLEMENTED YET]
+    - Talker: Text embeddings -> Audio waveform (TTS) [NOT IMPLEMENTED YET]
     """
 
     supports_multimodal = True
@@ -91,23 +86,18 @@ class MingFlashOmniForConditionalGeneration(
 
         config = vllm_config.model_config.hf_config
 
-        # Keep vllm_config for later submodule init
         self.vllm_config = vllm_config
         self.config = config
 
-        # The HF repo ships BailingMM2Config at the root (= thinker config directly).
-        # MingFlashOmniConfig is a local wrapper that the HF repo doesn't use.
         if isinstance(config, MingFlashOmniConfig):
             thinker_config: MingFlashOmniThinkerConfig = config.thinker_config
         else:
             thinker_config = config  # BailingMM2Config is the thinker config
         self.thinker_config = thinker_config
 
-        # Determine model stage
         self.model_stage = vllm_config.model_config.model_stage
 
         if self.model_stage == "thinker":
-            # Initialize thinker model (multimodal processing + text generation)
             thinker_vllm_config = vllm_config.with_hf_config(
                 thinker_config, architectures=["MingFlashOmniThinkerForConditionalGeneration"]
             )
@@ -186,20 +176,12 @@ class MingFlashOmniForConditionalGeneration(
         raise NotImplementedError("get_mrope_input_positions not available on current stage")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """
-        Load weights for all components of the Ming model.
-
-        Weights are expected to have prefixes:
-        - thinker.* for thinker stage
-        - imagegen.* for image generator stage
-        - talker.* for talker stage
-        """
+        """Load weights for all components of the Ming model."""
         loaded_weights = set()
         thinker_weights = []
         imagegen_weights = []
         talker_weights = []
 
-        # Separate weights by component prefix
         for name, value in weights:
             if name.startswith("thinker."):
                 thinker_weights.append((name, value))
@@ -211,7 +193,6 @@ class MingFlashOmniForConditionalGeneration(
                 # Weights without prefix go to thinker by default
                 thinker_weights.append((name, value))
 
-        # Load thinker weights if available
         if self.model_stage == "thinker" and thinker_weights:
             # Remove "thinker." prefix before loading
             thinker_weights_stripped = [

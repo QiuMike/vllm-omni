@@ -4,10 +4,6 @@
 # Adapted from Ming repository modeling_bailingmm2.py
 # https://github.com/inclusionAI/Ming
 
-"""Modality projectors for Ming-flash-omni-2.0,
-which map encoder outputs into the LLM's embedding space
-"""
-
 from collections.abc import Iterable
 
 import torch
@@ -19,7 +15,7 @@ logger = init_logger(__name__)
 
 
 class Transpose(nn.Module):
-    """Transpose two dimensions of a tensor. Used in nn.Sequential pipelines."""
+    """Used in nn.Sequential pipelines."""
 
     def __init__(self, dim0: int, dim1: int):
         super().__init__()
@@ -62,8 +58,6 @@ class VisionProjector(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # HF stores as "0.weight", "2.weight" etc.
-            # but we wrap in self.proj = nn.Sequential, so params are "proj.0.weight"
             if not name.startswith("proj."):
                 name = f"proj.{name}"
             if name not in params_dict:
@@ -77,12 +71,7 @@ class VisionProjector(nn.Module):
 
 
 class AudioProjector(nn.Module):
-    """Conv1d downsampling + MLP projector for audio features.
-
-    The projection pipeline:
-        1. Conv1d: [B, audio_dim, T] → [B, llm_dim, T']  (temporal downsampling)
-        2. Transpose to [B, T', llm_dim]
-        3. Optional MLP layers: GELU + Linear (repeated mlp_depth-1 times)
+    """Projector for audio features.
 
     Args:
         audio_dim: Audio encoder output dimension (n_state).
@@ -126,8 +115,8 @@ class AudioProjector(nn.Module):
             x: [B, T, audio_dim] audio encoder output (channel-last).
 
         Returns:
-            [B, T', llm_dim] projected features (channel-last), where
-            T' = (T - ds_kernel_size + 2*(ds_kernel_size//2)) // ds_stride + 1.
+            [B, T', llm_dim] projected features (channel-last),
+            where T' = (T - ds_kernel_size + 2*(ds_kernel_size//2)) // ds_stride + 1.
         """
         # Conv1d expects [B, C, T], so transpose input
         x = x.transpose(-1, -2)  # [B, audio_dim, T]
@@ -169,18 +158,13 @@ class AudioProjector(nn.Module):
     def compute_output_length(self, input_length: torch.Tensor) -> torch.Tensor:
         """Compute output sequence length after Conv1d downsampling.
 
-        This accounts for both the Whisper encoder's internal Conv1d
-        and this projector's Conv1d.
-
         Args:
             input_length: Original mel spectrogram lengths.
 
         Returns:
             Output lengths after both convolutions.
         """
-        # Whisper encoder conv: kernel=3, stride=2, padding=1
         length = (input_length - 3 + 2 * 1) // 2 + 1
-        # Audio projector conv
         length = (length - self.ds_kernel_size + 2 * (self.ds_kernel_size // 2)) // self.ds_stride + 1
         return length
 
@@ -188,8 +172,6 @@ class AudioProjector(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # HF stores as "0.weight", "3.weight" etc.
-            # but we wrap in self.proj = nn.Sequential, so params are "proj.0.weight"
             if not name.startswith("proj."):
                 name = f"proj.{name}"
             if name not in params_dict:

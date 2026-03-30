@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
 # Copyright 2024 ANT Group and the HuggingFace Inc. team.
+# Copyright (c) 2022 OpenAI
 # Adapted from Ming repository modeling_whisper_encoder.py
 # https://github.com/inclusionAI/Ming
 
@@ -20,7 +21,8 @@ from vllm_omni.diffusion.attention.backends.utils.fa import HAS_FLASH_ATTN, flas
 logger = init_logger(__name__)
 
 
-# vllm_omni/model_executor/models/qwen3_tts/tokenizer_25hz/vq/whisper_encoder.py
+# Ported from vllm_omni/model_executor/models/qwen3_tts/tokenizer_25hz/vq/whisper_encoder.py
+# TODO: we might want to extract util functions in future
 def sinusoids(length, channels, max_timescale=10000):
     """Returns sinusoids for positional embedding"""
     assert channels % 2 == 0
@@ -47,10 +49,8 @@ class Linear(nn.Linear):
 
 
 class MultiHeadAttention(nn.Module):
-    """Multi-head attention with packed sequence support via cu_seqlens.
-
-    This implementation uses flash_attn_varlen_func for efficient variable-length
-    attention without padding, adapted from Qwen3-TTS WhisperEncoder.
+    """Multi-head attention with packed sequence support.
+    Adapted from Qwen3-TTS WhisperEncoder.
     """
 
     def __init__(self, n_state: int, n_head: int, use_flash_attn: bool = True):
@@ -82,19 +82,18 @@ class MultiHeadAttention(nn.Module):
         n_ctx, n_state = q.shape
         head_dim = n_state // self.n_head
 
-        # Reshape for multi-head attention: [T, H, D]
         q = q.view(n_ctx, self.n_head, head_dim)
         k = k.view(n_ctx, self.n_head, head_dim)
         v = v.view(n_ctx, self.n_head, head_dim)
 
-        # Try flash attention varlen if available and dtype is supported
+        # Try flash attention varlen
         if self.use_flash_attn and cu_seqlens is not None and q.dtype in [torch.float16, torch.bfloat16]:
             try:
                 max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
                 attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen)
             except Exception as e:
                 logger.warning(f"Flash attention varlen failed ({e}), falling back to manual")
-                self.use_flash_attn = False  # Disable for future calls
+                self.use_flash_attn = False  # disable for future calls
                 attn_output = self._manual_attention(q, k, v, cu_seqlens)
         else:
             attn_output = self._manual_attention(q, k, v, cu_seqlens)
@@ -149,8 +148,6 @@ class MultiHeadAttention(nn.Module):
 
         # Transpose back: [B, H, T, D] -> [B, T, H, D]
         context = context.transpose(1, 2).contiguous()
-
-        # Pack back into single tensor
         output_packed = torch.cat([context[i, : seqlens[i]] for i in range(batch_size)], dim=0)
 
         return output_packed
@@ -159,8 +156,9 @@ class MultiHeadAttention(nn.Module):
 class ResidualAttentionBlock(nn.Module):
     """Whisper-style residual attention block with packed sequence support.
 
+    Adapted from
+    https://github.com/openai/whisper/blob/v20250625/whisper/model.py
     vllm_omni/model_executor/models/qwen3_tts/tokenizer_25hz/vq/whisper_encoder.py
-    whisper/model.py
     """
 
     def __init__(self, n_state: int, n_head: int, use_flash_attn: bool = True):
@@ -210,7 +208,6 @@ class WhisperAudioEncoder(nn.Module):
         self.ln_post = nn.LayerNorm(n_state)
         self.audio_emb_dim = n_state
 
-        # Configuration
         self.n_layer = n_layer
         self.n_mels = n_mels
         self.use_flash_attn = use_flash_attn
@@ -222,9 +219,6 @@ class WhisperAudioEncoder(nn.Module):
     ) -> torch.Tensor:
         """Forward pass with packed sequence format for variable-length inputs.
 
-        This method processes a list of variable-length audio features without
-        padding, concatenating them into a packed format for efficient processing.
-
         Args:
             x_list: List of [n_mels, T_i] mel spectrogram features for each audio
             audio_lens: List of original audio lengths in frames
@@ -233,15 +227,12 @@ class WhisperAudioEncoder(nn.Module):
             [total_T', n_state] packed encoded audio features, where
             total_T' is the sum of all encoded sequence lengths
         """
-        # Cast inputs to model dtype at the boundary so all activations and
-        # parameters are consistent (avoids LayerNorm/Linear weight dtype mismatch).
+        # Cast inputs to model dtype
         target_dtype = self.conv1.weight.dtype
         x_list = [x.to(target_dtype) for x in x_list]
 
-        # Process each audio through conv layers and add positional embeddings
         encoded_list = []
         encoded_lens = []
-
         for mel_spec in x_list:
             # mel_spec: [n_mels, T] - process through conv layers
             x = mel_spec.unsqueeze(0)  # [1, n_mels, T]
@@ -257,14 +248,11 @@ class WhisperAudioEncoder(nn.Module):
             encoded_list.append(x)
             encoded_lens.append(seq_len)
 
-        # Concatenate all sequences into packed format
         x_packed = torch.cat(encoded_list, dim=0)  # [total_T', n_state]
 
-        # Compute cumulative sequence lengths for attention
         cu_seqlens = list(accumulate(encoded_lens, func=operator.add, initial=0))
         cu_seqlens = torch.tensor(cu_seqlens, device=x_packed.device, dtype=torch.int32)
 
-        # Process through transformer blocks with packed sequences
         for block in self.blocks:
             x_packed = block(x_packed, cu_seqlens=cu_seqlens)
 
@@ -272,10 +260,6 @@ class WhisperAudioEncoder(nn.Module):
         return x_packed
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Include both parameters and buffers (positional_embedding is a buffer).
-        # Use a single dict[str, Tensor] to avoid the type mismatch from merging
-        # named_parameters() into named_buffers() or vice versa.
-        # default_weight_loader (param.data.copy_) is correct for both.
         params_dict: dict[str, torch.Tensor] = {
             **dict(self.named_parameters(remove_duplicate=False)),
             **dict(self.named_buffers()),

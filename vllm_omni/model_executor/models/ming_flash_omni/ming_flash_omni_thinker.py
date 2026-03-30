@@ -524,8 +524,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
     """
 
     hf_to_vllm_mapper = WeightsMapper(
-        # "model.*" (HF) -> "llm.*";
-        # vision.*, audio.*, linear_proj.*, linear_proj_audio.* already match
         orig_to_new_prefix={"model.": "llm."},
     )
 
@@ -695,33 +693,27 @@ class MingFlashOmniThinkerForConditionalGeneration(
         """Compute vision and audio MoE-routing masks from input_ids.
 
         Returns:
-            (vision_mask, audio_mask) — each is ``None`` when the modality is
-            absent, otherwise a bool tensor suitable for the MoE MultiRouter.
+            Tuple of vision_mask, audio_mask
         """
-        # BailingMoeV2Config
         llm_config = self.config
-
-        # vLLM model runner passes 1D [total_tokens] input_ids,
-        # but the MoE block expects 2D [B, T]. Normalize here.
-        ids_2d = input_ids if input_ids.ndim == 2 else input_ids.unsqueeze(0)
 
         # vision mask
         image_token = getattr(llm_config, "image_patch_token", None)
         video_token = getattr(llm_config, "video_patch_token", None)
         vision_mask = None
         if image_token is not None or video_token is not None:
-            mask = torch.zeros_like(ids_2d, dtype=torch.bool)
+            mask = torch.zeros_like(input_ids, dtype=torch.bool)
             if image_token is not None:
-                mask = mask | (ids_2d == image_token)
+                mask = mask | (input_ids == image_token)
             if video_token is not None:
-                mask = mask | (ids_2d == video_token)
-            vision_mask = mask.unsqueeze(-1).to(ids_2d.device)
+                mask = mask | (input_ids == video_token)
+            vision_mask = mask.unsqueeze(-1)
 
         # audio mask
         audio_token = getattr(llm_config, "audio_patch_token", None)
         audio_mask = None
         if audio_token is not None:
-            audio_mask = ids_2d == audio_token  # [B, T] bool
+            audio_mask = input_ids == audio_token
 
         return vision_mask, audio_mask
 
