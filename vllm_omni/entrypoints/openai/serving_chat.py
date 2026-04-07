@@ -773,7 +773,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
-        previous_num_completion_tokens = 0
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -929,7 +928,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                         if finish_reason_sent[i]:
                             continue
 
-                        output.token_ids = output.token_ids[previous_num_tokens[i]:]
+                        output.token_ids = output.token_ids[previous_num_tokens[i] :]
                         if request.logprobs and request.top_logprobs is not None:
                             assert output.logprobs is not None, "Did not output logprobs"
                             logprobs = self._create_chat_logprobs(
@@ -1252,7 +1251,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
                         # set the previous values for the next iteration
                         previous_num_tokens[i] += len(output.token_ids)
-                        previous_num_completion_tokens += len(output.token_ids)
 
                         # if the message delta is None (e.g. because it was a
                         # "control token" for tool calls or the parser otherwise
