@@ -428,6 +428,46 @@ class TestIsReasoningEnd:
     def test_text_only_no_end(self, text_only_parser):
         assert text_only_parser.is_reasoning_end([1, 2, 3]) is False
 
+    def test_start_after_end_returns_false(self, single_token_parser):
+        """Multi-turn prompt: start marker AFTER end marker → reasoning
+        is still active (the generation prompt's start marker)."""
+        # IDs: [start=100, end=101, start=100] → last marker is start
+        assert single_token_parser.is_reasoning_end([100, 101, 100]) is False
+
+    def test_end_is_last_marker_returns_true(self, single_token_parser):
+        """End marker is the last marker → reasoning has ended."""
+        # IDs: [start=100, end=101] → last marker is end
+        assert single_token_parser.is_reasoning_end([100, 101]) is True
+
+    def test_start_only_no_end(self, single_token_parser):
+        """Only a start marker, no end marker → reasoning is active."""
+        assert single_token_parser.is_reasoning_end([100, 1, 2]) is False
+
+    def test_multi_turn_prompt_start_after_end(self, multi_token_parser):
+        """Simulated multi-turn prompt with previous assistant response.
+
+        Prompt contains: ... </think ... <think ...
+        The last marker is <think (start), so is_reasoning_end
+        should return False.
+        """
+        # Decode of these IDs: "reasoning" +  "</ " + "think>" + " " + "<think"
+        # The last marker is the start marker.
+        # Using: [3=reasoning, 522="</", 26865="think>", 100=TS]
+        ids = [3, 522, 26865, 100]
+        assert multi_token_parser.is_reasoning_end(ids) is False
+
+    def test_multi_turn_prompt_end_is_last(self, multi_token_parser):
+        """Previous turn ends with </think, no new start → ended."""
+        # [3=reasoning, 522="</", 26865="think>"]
+        ids = [3, 522, 26865]
+        assert multi_token_parser.is_reasoning_end(ids) is True
+
+    def test_special_start_after_end(self, multi_token_parser):
+        """Special token start after end marker → reasoning still active."""
+        # [151670=<|THINK_END|>, 151669=<|THINK_START|>]
+        ids = [151670, 151669]
+        assert multi_token_parser.is_reasoning_end(ids) is False
+
 
 # ---------------------------------------------------------------------------
 # is_reasoning_end_streaming
