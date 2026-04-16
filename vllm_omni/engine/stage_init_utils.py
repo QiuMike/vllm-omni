@@ -333,6 +333,7 @@ def build_vllm_config(
     soc = filtered_engine_args_dict.get("structured_outputs_config")
     if isinstance(soc, dict):
         from vllm.config import StructuredOutputsConfig
+
         filtered_engine_args_dict["structured_outputs_config"] = StructuredOutputsConfig(**soc)
 
     omni_engine_args = OmniEngineArgs(**filtered_engine_args_dict)
