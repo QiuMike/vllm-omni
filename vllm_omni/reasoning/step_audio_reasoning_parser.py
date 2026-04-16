@@ -49,39 +49,26 @@ class StepAudioReasoningParser(ReasoningParser):
 
         if not self.model_tokenizer:
             raise ValueError(
-                "The model tokenizer must be passed to the ReasoningParser "
-                "constructor during construction."
+                "The model tokenizer must be passed to the ReasoningParser constructor during construction."
             )
 
         # --- Resolve think markers ----------------------------------------
         # Special-token form (single tokens in vocab for fast ID checks).
-        self.think_start_special_id: int = self.vocab.get(
-            self.THINK_START_SPECIAL, -1
-        )
-        self.think_end_special_id: int = self.vocab.get(
-            self.THINK_END_SPECIAL, -1
-        )
+        self.think_start_special_id: int = self.vocab.get(self.THINK_START_SPECIAL, -1)
+        self.think_end_special_id: int = self.vocab.get(self.THINK_END_SPECIAL, -1)
 
         # Text-form markers in vocab (usually NOT single tokens for
         # Step-Audio, but checked for completeness).
-        self.think_start_text_id: int = self.vocab.get(
-            self.THINK_START_TEXT, -1
-        )
-        self.think_end_text_id: int = self.vocab.get(
-            self.THINK_END_TEXT, -1
-        )
+        self.think_start_text_id: int = self.vocab.get(self.THINK_START_TEXT, -1)
+        self.think_end_text_id: int = self.vocab.get(self.THINK_END_TEXT, -1)
 
         # Set canonical token IDs for the ReasoningParser base contract.
         # Prefer special-token IDs; fall back to text-form IDs.
         self.think_start_token_id: int = (
-            self.think_start_special_id
-            if self.think_start_special_id != -1
-            else self.think_start_text_id
+            self.think_start_special_id if self.think_start_special_id != -1 else self.think_start_text_id
         )
         self.think_end_token_id: int = (
-            self.think_end_special_id
-            if self.think_end_special_id != -1
-            else self.think_end_text_id
+            self.think_end_special_id if self.think_end_special_id != -1 else self.think_end_text_id
         )
 
         # Whether single-token ID matching is possible for start/end.
@@ -111,8 +98,12 @@ class StepAudioReasoningParser(ReasoningParser):
         # When streaming, the tail of delta_text might be the start of one
         # of these markers (e.g. "</" could be the beginning of ATHINK_END_AT).
         # We buffer such ambiguous text to avoid leaking partial markers.
-        self._all_markers = (self.THINK_START_TEXT, self.THINK_END_TEXT,
-                             self.THINK_START_SPECIAL, self.THINK_END_SPECIAL)
+        self._all_markers = (
+            self.THINK_START_TEXT,
+            self.THINK_END_TEXT,
+            self.THINK_START_SPECIAL,
+            self.THINK_END_SPECIAL,
+        )
 
     # ------------------------------------------------------------------
     # Token-ID helpers
@@ -139,16 +130,10 @@ class StepAudioReasoningParser(ReasoningParser):
     # ------------------------------------------------------------------
 
     def _has_end_token_in_text(self, text: str) -> bool:
-        return (
-            self.THINK_END_TEXT in text
-            or self.THINK_END_SPECIAL in text
-        )
+        return self.THINK_END_TEXT in text or self.THINK_END_SPECIAL in text
 
     def _has_start_token_in_text(self, text: str) -> bool:
-        return (
-            self.THINK_START_TEXT in text
-            or self.THINK_START_SPECIAL in text
-        )
+        return self.THINK_START_TEXT in text or self.THINK_START_SPECIAL in text
 
     def _find_end_token_in_text(self, text: str) -> tuple[int, int]:
         """Find the first end token in text. Returns (start, end) indices
@@ -201,9 +186,9 @@ class StepAudioReasoningParser(ReasoningParser):
             # Fall back to token-ID-only check.
             result = self._has_end_token_in_ids(input_ids)
             logger.debug(
-                "StepAudio is_reasoning_end: decode failed, "
-                "fallback result=%s, num_ids=%d",
-                result, len(input_ids),
+                "StepAudio is_reasoning_end: decode failed, fallback result=%s, num_ids=%d",
+                result,
+                len(input_ids),
             )
             return result
 
@@ -220,9 +205,9 @@ class StepAudioReasoningParser(ReasoningParser):
         if last_end == -1:
             # No end marker at all → reasoning not ended.
             logger.debug(
-                "StepAudio is_reasoning_end: no end marker found, "
-                "text_tail=%r (len=%d), returning False",
-                text[-100:] if len(text) > 100 else text, len(text),
+                "StepAudio is_reasoning_end: no end marker found, text_tail=%r (len=%d), returning False",
+                text[-100:] if len(text) > 100 else text,
+                len(text),
             )
             return False
 
@@ -230,23 +215,21 @@ class StepAudioReasoningParser(ReasoningParser):
             # Last marker is a START marker (e.g. the generation prompt's
             # ``).  Reasoning is still active.
             logger.debug(
-                "StepAudio is_reasoning_end: last_start=%d > last_end=%d, "
-                "reasoning still active, returning False",
-                last_start, last_end,
+                "StepAudio is_reasoning_end: last_start=%d > last_end=%d, reasoning still active, returning False",
+                last_start,
+                last_end,
             )
             return False
 
         # Last marker is an END marker → reasoning has ended.
         logger.debug(
-            "StepAudio is_reasoning_end: last_end=%d >= last_start=%d, "
-            "reasoning ended, returning True",
-            last_end, last_start,
+            "StepAudio is_reasoning_end: last_end=%d >= last_start=%d, reasoning ended, returning True",
+            last_end,
+            last_start,
         )
         return True
 
-    def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Iterable[int]
-    ) -> bool:
+    def is_reasoning_end_streaming(self, input_ids: Sequence[int], delta_ids: Iterable[int]) -> bool:
         delta_list = tuple(delta_ids)
         # Fast check: single-token markers in delta.
         if self._has_end_token_in_ids(delta_list):
@@ -270,9 +253,7 @@ class StepAudioReasoningParser(ReasoningParser):
         if self._has_end_token_id:
             # Check for special-token or text-form single token.
             for end_id in (self.think_end_special_id, self.think_end_text_id):
-                if end_id != -1 and end_id in islice(
-                    input_ids, 0, max(0, len(input_ids) - 1)
-                ):
+                if end_id != -1 and end_id in islice(input_ids, 0, max(0, len(input_ids) - 1)):
                     idx = input_ids.index(end_id)
                     return input_ids[idx + 1 :]
 
@@ -302,12 +283,13 @@ class StepAudioReasoningParser(ReasoningParser):
     ) -> tuple[str | None, str | None]:
         logger.debug(
             "StepAudio extract_reasoning: model_output=%r (len=%d)",
-            model_output[:200], len(model_output),
+            model_output[:200],
+            len(model_output),
         )
         # Strip leading start token if present (text or special form).
         for start_tok in (self.THINK_START_TEXT, self.THINK_START_SPECIAL):
             if model_output.startswith(start_tok):
-                model_output = model_output[len(start_tok):]
+                model_output = model_output[len(start_tok) :]
                 logger.debug("StepAudio extract_reasoning: stripped start_tok=%r", start_tok)
                 break
 
@@ -316,9 +298,9 @@ class StepAudioReasoningParser(ReasoningParser):
         if end_pos == -1:
             # No end token found — everything is reasoning.
             logger.debug(
-                "StepAudio extract_reasoning: no end token, "
-                "reasoning=%r (len=%d), content=None",
-                model_output[:200], len(model_output),
+                "StepAudio extract_reasoning: no end token, reasoning=%r (len=%d), content=None",
+                model_output[:200],
+                len(model_output),
             )
             return model_output or None, None
 
@@ -327,11 +309,12 @@ class StepAudioReasoningParser(ReasoningParser):
         # Strip leading newline that models often emit right after end token.
         content = content.lstrip("\n")
         logger.debug(
-            "StepAudio extract_reasoning: end_pos=%d, "
-            "reasoning=%r (len=%d), content=%r (len=%d)",
+            "StepAudio extract_reasoning: end_pos=%d, reasoning=%r (len=%d), content=%r (len=%d)",
             end_pos,
-            reasoning[:200], len(reasoning),
-            content[:200], len(content),
+            reasoning[:200],
+            len(reasoning),
+            content[:200],
+            len(content),
         )
         return reasoning or None, content or None
 
@@ -400,12 +383,14 @@ class StepAudioReasoningParser(ReasoningParser):
         call_num = StepAudioReasoningParser._stream_call_count
         if call_num <= 20:
             logger.debug(
-                "StepAudio stream #%d: prev_text=%r (len=%d), "
-                "delta_text=%r (len=%d), _reasoning_ended=%s, _pending=%r",
+                "StepAudio stream #%d: prev_text=%r (len=%d), delta_text=%r (len=%d), _reasoning_ended=%s, _pending=%r",
                 call_num,
-                previous_text[:100], len(previous_text),
-                delta_text[:100], len(delta_text),
-                self._reasoning_ended, self._pending[:50] if self._pending else "",
+                previous_text[:100],
+                len(previous_text),
+                delta_text[:100],
+                len(delta_text),
+                self._reasoning_ended,
+                self._pending[:50] if self._pending else "",
             )
 
         # Prepend any pending text from a previous call.
@@ -426,10 +411,13 @@ class StepAudioReasoningParser(ReasoningParser):
 
         if call_num <= 20:
             logger.debug(
-                "StepAudio stream #%d: has_end=%s, has_end_in_previous=%s, "
-                "has_end_in_delta=%s, combined=%r (len=%d)",
-                call_num, has_end, has_end_in_previous, has_end_in_delta,
-                combined[:150], len(combined),
+                "StepAudio stream #%d: has_end=%s, has_end_in_previous=%s, has_end_in_delta=%s, combined=%r (len=%d)",
+                call_num,
+                has_end,
+                has_end_in_previous,
+                has_end_in_delta,
+                combined[:150],
+                len(combined),
             )
 
         if has_end_in_previous or self._reasoning_ended:
@@ -507,7 +495,7 @@ class StepAudioReasoningParser(ReasoningParser):
                 return None
             else:
                 # Emit the non-ambiguous part as reasoning, buffer the rest.
-                to_emit = delta_text[:-len(ambiguous_suffix)]
+                to_emit = delta_text[: -len(ambiguous_suffix)]
                 self._pending = ambiguous_suffix
                 return DeltaMessage(reasoning=to_emit) if to_emit else None
 

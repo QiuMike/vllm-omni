@@ -21,39 +21,47 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Bootstrap minimal vLLM stubs so the parser can be imported
 # ---------------------------------------------------------------------------
+
 
 def _setup_vllm_stubs():
     """Create minimal stub modules for vllm imports used by the parser."""
     # DeltaMessage stub
     delta_mod = ModuleType("vllm.entrypoints.openai.engine.protocol")
+
     class DeltaMessage:
         __slots__ = ("reasoning", "content")
+
         def __init__(self, reasoning=None, content=None):
             self.reasoning = reasoning
             self.content = content
+
     delta_mod.DeltaMessage = DeltaMessage
     sys.modules["vllm.entrypoints.openai.engine.protocol"] = delta_mod
 
     # ReasoningParser stub
     reasoning_mod = ModuleType("vllm.reasoning")
+
     class ReasoningParser:
         def __init__(self, tokenizer, *args, **kwargs):
             self.model_tokenizer = tokenizer
+
         @property
         def vocab(self):
             if not self.model_tokenizer:
                 return {}
             return self.model_tokenizer.get_vocab()
+
     class _ReasoningParserManager:
         reasoning_parsers = {}
         lazy_parsers = {}
+
         @classmethod
         def register_lazy_module(cls, name, module_path, class_name):
             cls.lazy_parsers[name] = (module_path, class_name)
+
     reasoning_mod.ReasoningParser = ReasoningParser
     reasoning_mod.ReasoningParserManager = _ReasoningParserManager
     sys.modules["vllm.reasoning"] = reasoning_mod
@@ -74,7 +82,9 @@ def _setup_vllm_stubs():
 
     # vllm and vllm.entrypoints openai stubs
     for mod_path in [
-        "vllm", "vllm.entrypoints", "vllm.entrypoints.openai",
+        "vllm",
+        "vllm.entrypoints",
+        "vllm.entrypoints.openai",
         "vllm.entrypoints.openai.engine",
         "vllm.entrypoints.openai.chat_completion",
         "vllm.entrypoints.openai.responses",
@@ -89,15 +99,16 @@ _setup_vllm_stubs()
 from vllm_omni.reasoning.step_audio_reasoning_parser import StepAudioReasoningParser  # noqa: E402
 
 # Short aliases for marker constants
-TS = StepAudioReasoningParser.THINK_START_TEXT       # <think>
-TE = StepAudioReasoningParser.THINK_END_TEXT         # </think>
-TSS = StepAudioReasoningParser.THINK_START_SPECIAL   # <|THINK_START|>
-TES = StepAudioReasoningParser.THINK_END_SPECIAL     # <|THINK_END|>
+TS = StepAudioReasoningParser.THINK_START_TEXT  # <think>
+TE = StepAudioReasoningParser.THINK_END_TEXT  # </think>
+TSS = StepAudioReasoningParser.THINK_START_SPECIAL  # <|THINK_START|>
+TES = StepAudioReasoningParser.THINK_END_SPECIAL  # <|THINK_END|>
 
 
 # ---------------------------------------------------------------------------
 # Mock tokenizers
 # ---------------------------------------------------------------------------
+
 
 class SingleTokenTokenizer:
     """Tokenizer where both ``<think>`` and ``</think>`` are single tokens.
@@ -108,10 +119,10 @@ class SingleTokenTokenizer:
 
     def __init__(self):
         self._vocab = {
-            TS: 100,             # <think>
-            TE: 101,             # </think>
-            TSS: 151669,         # <|THINK_START|>
-            TES: 151670,         # <|THINK_END|>
+            TS: 100,  # <think>
+            TE: 101,  # </think>
+            TSS: 151669,  # <|THINK_START|>
+            TES: 151670,  # <|THINK_END|>
             "Hello": 1,
             " world": 2,
             "reasoning": 3,
@@ -149,12 +160,12 @@ class MultiTokenTokenizer:
 
     def __init__(self):
         self._vocab = {
-            TS: 100,             # <think> - single token
+            TS: 100,  # <think> - single token
             # </think> is intentionally NOT in the vocab
             "</": 522,
             "think>": 26865,
-            TSS: 151669,         # <|THINK_START|>
-            TES: 151670,         # <|THINK_END|>
+            TSS: 151669,  # <|THINK_START|>
+            TES: 151670,  # <|THINK_END|>
             "Hello": 1,
             " world": 2,
             "reasoning": 3,
@@ -187,8 +198,8 @@ class TextOnlyTokenizer:
 
     def __init__(self):
         self._vocab = {
-            TS: 100,             # <think>
-            TE: 101,             # </think>
+            TS: 100,  # <think>
+            TE: 101,  # </think>
             "Hello": 1,
             " world": 2,
             "reasoning": 3,
@@ -215,6 +226,7 @@ class TextOnlyTokenizer:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _stream_extract(parser, deltas_and_ids):
     """Run streaming extraction over a list of (delta_text, delta_ids) tuples.
     Returns (reasoning_text, content_text)."""
@@ -226,9 +238,7 @@ def _stream_extract(parser, deltas_and_ids):
     for delta_text, delta_ids in deltas_and_ids:
         cur_text = prev_text + delta_text
         cur_ids = prev_ids + delta_ids
-        result = parser.extract_reasoning_streaming(
-            prev_text, cur_text, delta_text, prev_ids, cur_ids, delta_ids
-        )
+        result = parser.extract_reasoning_streaming(prev_text, cur_text, delta_text, prev_ids, cur_ids, delta_ids)
         if result is not None:
             if result.reasoning:
                 all_r.append(result.reasoning)
@@ -243,6 +253,7 @@ def _stream_extract(parser, deltas_and_ids):
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def single_token_parser():
@@ -267,6 +278,7 @@ def request_obj():
 # ---------------------------------------------------------------------------
 # Initialization tests
 # ---------------------------------------------------------------------------
+
 
 class TestInit:
     def test_single_token_ids(self, single_token_parser):
@@ -316,10 +328,16 @@ class TestInit:
 # extract_reasoning (non-streaming)
 # ---------------------------------------------------------------------------
 
+
 class TestExtractReasoning:
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser", "text_only_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+            "text_only_parser",
+        ],
+    )
     def test_basic_extraction(self, request, parser_name, request_obj):
         parser = request.getfixturevalue(parser_name)
         output = f"some reasoning{TE}Hello world"
@@ -327,9 +345,14 @@ class TestExtractReasoning:
         assert reasoning == "some reasoning"
         assert content == "Hello world"
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser", "text_only_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+            "text_only_parser",
+        ],
+    )
     def test_no_end_token(self, request, parser_name, request_obj):
         parser = request.getfixturevalue(parser_name)
         output = "still thinking..."
@@ -337,9 +360,14 @@ class TestExtractReasoning:
         assert reasoning == "still thinking..."
         assert content is None
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser", "text_only_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+            "text_only_parser",
+        ],
+    )
     def test_with_start_token_prefix(self, request, parser_name, request_obj):
         parser = request.getfixturevalue(parser_name)
         output = f"{TS}my reasoning{TE}answer"
@@ -347,9 +375,14 @@ class TestExtractReasoning:
         assert reasoning == "my reasoning"
         assert content == "answer"
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser", "text_only_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+            "text_only_parser",
+        ],
+    )
     def test_strips_newline_after_end(self, request, parser_name, request_obj):
         parser = request.getfixturevalue(parser_name)
         output = f"reasoning{TE}\nHello"
@@ -357,9 +390,14 @@ class TestExtractReasoning:
         assert reasoning == "reasoning"
         assert content == "Hello"
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser", "text_only_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+            "text_only_parser",
+        ],
+    )
     def test_empty_reasoning(self, request, parser_name, request_obj):
         parser = request.getfixturevalue(parser_name)
         output = f"{TE}Hello"
@@ -367,9 +405,13 @@ class TestExtractReasoning:
         assert reasoning is None
         assert content == "Hello"
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+        ],
+    )
     def test_special_end_token(self, request, parser_name, request_obj):
         """Test with <|THINK_END|> special token form."""
         parser = request.getfixturevalue(parser_name)
@@ -378,9 +420,13 @@ class TestExtractReasoning:
         assert reasoning == "reasoning"
         assert content == "answer"
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+        ],
+    )
     def test_special_start_token(self, request, parser_name, request_obj):
         """Test with <|THINK_START|> special token form."""
         parser = request.getfixturevalue(parser_name)
@@ -393,6 +439,7 @@ class TestExtractReasoning:
 # ---------------------------------------------------------------------------
 # is_reasoning_end
 # ---------------------------------------------------------------------------
+
 
 class TestIsReasoningEnd:
     def test_single_token_text_end(self, single_token_parser):
@@ -473,72 +520,74 @@ class TestIsReasoningEnd:
 # is_reasoning_end_streaming
 # ---------------------------------------------------------------------------
 
+
 class TestIsReasoningEndStreaming:
     def test_single_token_delta_has_end(self, single_token_parser):
-        assert single_token_parser.is_reasoning_end_streaming(
-            [1, 2], [101]
-        ) is True
+        assert single_token_parser.is_reasoning_end_streaming([1, 2], [101]) is True
 
     def test_single_token_delta_no_end(self, single_token_parser):
-        assert single_token_parser.is_reasoning_end_streaming(
-            [1, 2], [3]
-        ) is False
+        assert single_token_parser.is_reasoning_end_streaming([1, 2], [3]) is False
 
     def test_multi_token_delta_has_both_parts(self, multi_token_parser):
         """Full </think> in delta → [522, 26865]."""
-        assert multi_token_parser.is_reasoning_end_streaming(
-            [1], [522, 26865]
-        ) is True
+        assert multi_token_parser.is_reasoning_end_streaming([1], [522, 26865]) is True
 
     def test_multi_token_marker_spans_boundary(self, multi_token_parser):
         """</ in previous, think> in delta."""
-        assert multi_token_parser.is_reasoning_end_streaming(
-            [1, 522], [26865]
-        ) is True
+        assert multi_token_parser.is_reasoning_end_streaming([1, 522], [26865]) is True
 
     def test_multi_token_no_end(self, multi_token_parser):
-        assert multi_token_parser.is_reasoning_end_streaming(
-            [1, 2], [3]
-        ) is False
+        assert multi_token_parser.is_reasoning_end_streaming([1, 2], [3]) is False
 
 
 # ---------------------------------------------------------------------------
 # extract_reasoning_streaming
 # ---------------------------------------------------------------------------
 
+
 class TestExtractReasoningStreaming:
     """Test streaming extraction for both single-token and multi-token modes."""
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser", "text_only_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+            "text_only_parser",
+        ],
+    )
     def test_simple_streaming(self, request_, parser_name):
         parser = request_.getfixturevalue(parser_name)
         # Simulate: <think> reasoning </think>  final
         if parser_name == "multi_token_parser":
             deltas = [TS, "reasoning", TE, " content"]
             token_ids_per_delta = [
-                [100],       # <think>
-                [3],         # reasoning
-                [522, 26865], # </think>
-                [4],         #  content
+                [100],  # <think>
+                [3],  # reasoning
+                [522, 26865],  # </think>
+                [4],  #  content
             ]
         else:
             deltas = [TS, "reasoning", TE, " content"]
             token_ids_per_delta = [
-                [100],       # <think>
-                [3],         # reasoning
-                [101],       # </think>
-                [4],         #  content
+                [100],  # <think>
+                [3],  # reasoning
+                [101],  # </think>
+                [4],  #  content
             ]
 
         r, c = _stream_extract(parser, list(zip(deltas, token_ids_per_delta)))
         assert r == "reasoning"
         assert c == " content"
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser", "text_only_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+            "text_only_parser",
+        ],
+    )
     def test_no_end_token_streaming(self, request_, parser_name):
         parser = request_.getfixturevalue(parser_name)
         deltas_and_ids = [
@@ -643,9 +692,13 @@ class TestExtractReasoningStreaming:
         assert r == ""
         assert c == ""
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+        ],
+    )
     def test_only_first_newline_stripped_after_end(self, request_, parser_name):
         """Only the first newline after </think> should be stripped."""
         parser = request_.getfixturevalue(parser_name)
@@ -665,9 +718,13 @@ class TestExtractReasoningStreaming:
         assert r == "reasoning"
         assert c == "\nHello"
 
-    @pytest.mark.parametrize("parser_name", [
-        "single_token_parser", "multi_token_parser",
-    ])
+    @pytest.mark.parametrize(
+        "parser_name",
+        [
+            "single_token_parser",
+            "multi_token_parser",
+        ],
+    )
     def test_content_after_end_multiple_deltas(self, request_, parser_name):
         """Multiple content deltas after end marker."""
         parser = request_.getfixturevalue(parser_name)
@@ -701,8 +758,8 @@ class TestExtractReasoningStreaming:
         deltas_and_ids = [
             (TS, [100]),
             ("reason", [3]),
-            ("<", [8]),         # "<" is buffered (prefix of markers)
-            ("> more", [8]),    # ">" doesn't complete any marker
+            ("<", [8]),  # "<" is buffered (prefix of markers)
+            ("> more", [8]),  # ">" doesn't complete any marker
         ]
         r, c = _stream_extract(parser, deltas_and_ids)
         assert r == "reason> more"
@@ -750,7 +807,10 @@ class TestExtractReasoningStreaming:
         r, c = _stream_extract(parser, deltas_and_ids)
         assert r == "reason> not a marker"
         assert c == ""
+
+
 # ---------------------------------------------------------------------------
+
 
 class TestCountReasoningTokens:
     def test_single_token_basic(self, single_token_parser):
@@ -784,6 +844,7 @@ class TestCountReasoningTokens:
 # extract_content_ids
 # ---------------------------------------------------------------------------
 
+
 class TestExtractContentIds:
     def test_single_token_basic(self, single_token_parser):
         # [1, 101=</think>, 2, 3] → content starts after ID 101
@@ -816,6 +877,7 @@ class TestExtractContentIds:
 # ---------------------------------------------------------------------------
 # Fixture request workaround (pytest "request" fixture shadowed by parametrize)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def request_(request):
