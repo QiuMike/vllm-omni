@@ -237,3 +237,7 @@ ue = "ue"
 semantics = "semantics"
 fullset = "fullset"
 Vai = "Vai"
+# Step-Audio reasoning parser streams `</think>` tokens split across chunks
+# (e.g. "</" + "thi" + "nk>"). The fragment "thi" appears literally in its
+# parser logic and tests and is not a typo of "the"/"this".
+thi = "thi"
