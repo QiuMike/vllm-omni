@@ -25,6 +25,12 @@ from .pipeline_wan2_2_vace import (
     get_wan22_vace_pre_process_func,
 )
 from .causal_wan2_2_transformer import CausalWanTransformer3DModel
+from .kv_cache import CrossAttentionKVCache, KVCacheManager, SelfAttentionKVCache
+from .pipeline_wan2_2_realtime import (
+    RealtimeSession,
+    RealtimeVideoMode,
+    Wan22RealtimePipeline,
+)
 from .wan2_2_transformer import WanTransformer3DModel
 from .wan2_2_vace_transformer import VaceWanTransformerBlock, WanVACETransformer3DModel
 
@@ -48,4 +54,10 @@ __all__ = [
     "WanTransformer3DModel",
     "VaceWanTransformerBlock",
     "WanVACETransformer3DModel",
+    "KVCacheManager",
+    "SelfAttentionKVCache",
+    "CrossAttentionKVCache",
+    "RealtimeSession",
+    "RealtimeVideoMode",
+    "Wan22RealtimePipeline",
 ]

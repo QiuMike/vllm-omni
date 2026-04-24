@@ -32,6 +32,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 from vllm_omni.diffusion.attention.layer import Attention
+from vllm_omni.diffusion.models.wan2_2.kv_cache import (
+    CrossAttentionKVCache,
+    SelfAttentionKVCache,
+)
 from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import (
     AdaLayerNorm,
     DistributedRMSNorm,
@@ -120,7 +124,7 @@ class CausalWanSelfAttention(nn.Module):
         hidden_states: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor],
         block_mask: BlockMask | None = None,
-        kv_cache: dict | None = None,
+        kv_cache: dict | SelfAttentionKVCache | None = None,
         current_start: int = 0,
         cache_start: int | None = None,
     ) -> torch.Tensor:
@@ -147,19 +151,36 @@ class CausalWanSelfAttention(nn.Module):
         query = apply_rotary_emb_wan(query, freqs_cos, freqs_sin)
         key = apply_rotary_emb_wan(key, freqs_cos, freqs_sin)
 
-        if kv_cache is None:
-            # Training mode: use flex_attention with block-wise causal mask
-            out = self._forward_flex_attention(query, key, value, block_mask)
-        else:
-            # Inference mode: use KV cache with sliding window
+        if isinstance(kv_cache, SelfAttentionKVCache):
+            out = self._forward_sa_kv_cache(
+                query, key, value, kv_cache, current_start
+            )
+        elif kv_cache is not None:
             out = self._forward_kv_cache(
                 query, key, value, kv_cache, current_start, cache_start
             )
+        elif block_mask is not None:
+            out = self._forward_flex_attention(query, key, value, block_mask)
+        else:
+            out = self.attn(query, key, value)
 
         # Output projection
         out = out.flatten(2, 3).type_as(query)
         out = self.to_out(out)
         return out
+
+    def _forward_sa_kv_cache(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: SelfAttentionKVCache,
+        current_start: int,
+    ) -> torch.Tensor:
+        """Inference path using SelfAttentionKVCache with sliding window eviction."""
+        kv_cache.append(key, value, current_start)
+        active_k, active_v = kv_cache.get_active_kv(self.max_attention_size)
+        return self.attn(query, active_k, active_v)
 
     def _forward_flex_attention(
         self,
@@ -316,7 +337,8 @@ class CausalWanTransformerBlock(nn.Module):
         temb: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor],
         block_mask: BlockMask | None = None,
-        kv_cache: dict | None = None,
+        kv_cache: dict | SelfAttentionKVCache | None = None,
+        crossattn_cache: CrossAttentionKVCache | None = None,
         current_start: int = 0,
         cache_start: int | None = None,
     ) -> torch.Tensor:
@@ -349,9 +371,16 @@ class CausalWanTransformerBlock(nn.Module):
         )
         hidden_states = (hidden_states + attn_output * gate_msa).type_as(hidden_states)
 
-        # 2. Cross-attention
+        # 2. Cross-attention (with optional caching)
         norm_hidden_states = self.norm2(hidden_states).type_as(hidden_states)
-        attn_output = self.attn2(norm_hidden_states, encoder_hidden_states)
+        if crossattn_cache is not None and crossattn_cache.is_initialized:
+            attn_output = self.attn2(norm_hidden_states, encoder_hidden_states)
+        else:
+            attn_output = self.attn2(norm_hidden_states, encoder_hidden_states)
+            if crossattn_cache is not None:
+                crossattn_cache.update(
+                    encoder_hidden_states, encoder_hidden_states
+                )
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
@@ -568,7 +597,8 @@ class CausalWanTransformer3DModel(nn.Module):
         encoder_hidden_states_image: torch.Tensor | None = None,
         return_dict: bool = True,
         attention_kwargs: dict[str, Any] | None = None,
-        kv_cache: list[dict] | None = None,
+        kv_cache: list[dict] | list[SelfAttentionKVCache] | None = None,
+        crossattn_cache: list[CrossAttentionKVCache] | None = None,
         current_start: int = 0,
         cache_start: int = 0,
         start_frame: int = 0,
@@ -582,6 +612,7 @@ class CausalWanTransformer3DModel(nn.Module):
                 return_dict,
                 attention_kwargs,
                 kv_cache=kv_cache,
+                crossattn_cache=crossattn_cache,
                 current_start=current_start,
                 cache_start=cache_start,
                 start_frame=start_frame,
@@ -612,10 +643,10 @@ class CausalWanTransformer3DModel(nn.Module):
         post_patch_height = height // p_h
         post_patch_width = width // p_w
 
-        # RoPE (uses start_frame for positional offset in inference)
-        rotary_emb = self.rope(hidden_states)
-        # TODO: if start_frame > 0, need to offset RoPE. For now this matches
-        # the standard WanRotaryPosEmbed which computes from frame 0.
+        # RoPE with start_frame offset for incremental inference
+        rotary_emb = self._compute_rotary_emb(
+            hidden_states, post_patch_num_frames, post_patch_height, post_patch_width, start_frame
+        )
 
         # Patch embedding
         hidden_states = self.patch_embedding(hidden_states)
@@ -656,6 +687,44 @@ class CausalWanTransformer3DModel(nn.Module):
             post_patch_height,
             post_patch_width,
         )
+
+    def _compute_rotary_emb(
+        self,
+        hidden_states: torch.Tensor,
+        ppf: int,
+        pph: int,
+        ppw: int,
+        start_frame: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute RoPE with optional frame offset for incremental inference."""
+        if start_frame == 0:
+            return self.rope(hidden_states)
+
+        head_dim = self.attention_head_dim
+        h_dim = w_dim = 2 * (head_dim // 6)
+        t_dim = head_dim - h_dim - w_dim
+
+        split_sizes = [
+            head_dim - 2 * (head_dim // 3),
+            head_dim // 3,
+            head_dim // 3,
+        ]
+        freqs_cos = self.rope.freqs_cos.split(split_sizes, dim=1)
+        freqs_sin = self.rope.freqs_sin.split(split_sizes, dim=1)
+
+        end_frame = start_frame + ppf
+        freqs_cos_f = freqs_cos[0][start_frame:end_frame].view(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)
+        freqs_cos_h = freqs_cos[1][:pph].view(1, pph, 1, -1).expand(ppf, pph, ppw, -1)
+        freqs_cos_w = freqs_cos[2][:ppw].view(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)
+
+        freqs_sin_f = freqs_sin[0][start_frame:end_frame].view(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)
+        freqs_sin_h = freqs_sin[1][:pph].view(1, pph, 1, -1).expand(ppf, pph, ppw, -1)
+        freqs_sin_w = freqs_sin[2][:ppw].view(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)
+
+        cos_emb = torch.cat([freqs_cos_f, freqs_cos_h, freqs_cos_w], dim=-1).reshape(1, ppf * pph * ppw, 1, -1)
+        sin_emb = torch.cat([freqs_sin_f, freqs_sin_h, freqs_sin_w], dim=-1).reshape(1, ppf * pph * ppw, 1, -1)
+
+        return cos_emb.to(hidden_states.device), sin_emb.to(hidden_states.device)
 
     def _forward_train(
         self,
@@ -712,7 +781,8 @@ class CausalWanTransformer3DModel(nn.Module):
         encoder_hidden_states_image: torch.Tensor | None = None,
         return_dict: bool = True,
         attention_kwargs: dict[str, Any] | None = None,
-        kv_cache: list[dict] | None = None,
+        kv_cache: list[dict] | list[SelfAttentionKVCache] | None = None,
+        crossattn_cache: list[CrossAttentionKVCache] | None = None,
         current_start: int = 0,
         cache_start: int = 0,
         start_frame: int = 0,
@@ -730,6 +800,7 @@ class CausalWanTransformer3DModel(nn.Module):
         # Transformer blocks with KV cache
         for block_index, block in enumerate(self.blocks):
             block_kv_cache = kv_cache[block_index] if kv_cache is not None else None
+            block_crossattn_cache = crossattn_cache[block_index] if crossattn_cache is not None else None
             hidden_states = block(
                 hidden_states,
                 encoder_hidden_states,
@@ -737,6 +808,7 @@ class CausalWanTransformer3DModel(nn.Module):
                 rotary_emb,
                 block_mask=self.block_mask,
                 kv_cache=block_kv_cache,
+                crossattn_cache=block_crossattn_cache,
                 current_start=current_start,
                 cache_start=cache_start,
             )
@@ -759,7 +831,17 @@ class CausalWanTransformer3DModel(nn.Module):
     ) -> torch.Tensor | Transformer2DModelOutput:
         p_t, p_h, p_w = self.config.patch_size
 
-        shift, scale = (self.scale_shift_table.to(hidden_states.device) + temb.unsqueeze(1)).chunk(2, dim=1)
+        if temb.ndim == 3:
+            shift, scale = (
+                self.scale_shift_table.unsqueeze(0).to(hidden_states.device)
+                + temb.unsqueeze(2)
+            ).chunk(2, dim=2)
+            shift = shift.squeeze(2)
+            scale = scale.squeeze(2)
+        else:
+            shift, scale = (
+                self.scale_shift_table.to(hidden_states.device) + temb.unsqueeze(1)
+            ).chunk(2, dim=1)
         hidden_states = self.norm_out(hidden_states, scale, shift).type_as(hidden_states)
         hidden_states = self.proj_out(hidden_states)
 
