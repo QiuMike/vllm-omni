@@ -133,6 +133,22 @@ class Wan22RealtimePipeline:
     def device(self) -> torch.device:
         return next(self.transformer.parameters()).device
 
+    _MIN_PROMPT_TOKENS = 40
+
+    def _pad_short_prompt(self, prompt: str) -> str:
+        """Repeat short prompts to fill more cross-attention positions.
+
+        Short prompts produce few non-zero positions in the 512-length embedding,
+        so cross-attention signal gets diluted by zero-padded bias-only keys.
+        Repeating the prompt text gives the model more real-token positions to
+        attend to, making prompt changes more visible during streaming.
+        """
+        tokens = self.tokenizer(prompt, add_special_tokens=False).input_ids
+        if len(tokens) >= self._MIN_PROMPT_TOKENS:
+            return prompt
+        reps = (self._MIN_PROMPT_TOKENS // max(len(tokens), 1)) + 1
+        return ". ".join([prompt] * reps)
+
     def encode_prompt(
         self,
         prompt: str | list[str],
@@ -143,7 +159,9 @@ class Wan22RealtimePipeline:
         dtype = self.text_encoder.dtype
 
         if isinstance(prompt, str):
-            prompt = [prompt]
+            prompt = [self._pad_short_prompt(prompt)]
+        else:
+            prompt = [self._pad_short_prompt(p) for p in prompt]
 
         text_inputs = self.tokenizer(
             prompt,
