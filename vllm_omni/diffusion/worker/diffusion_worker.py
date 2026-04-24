@@ -275,6 +275,112 @@ class DiffusionWorker:
     def pin_lora(self, adapter_id: int) -> bool:
         return self.lora_manager.pin_adapter(adapter_id)
 
+    # ==================== Realtime Video ====================
+
+    def realtime_create_session(self, session_id: str, config: dict) -> bool:
+        """Create a realtime video pipeline + session on this worker."""
+        if not hasattr(self, "_realtime_sessions"):
+            self._realtime_sessions: dict[str, tuple] = {}
+
+        if session_id in self._realtime_sessions:
+            return True
+
+        pipeline = self.model_runner.pipeline
+        if pipeline is None:
+            raise RuntimeError("No pipeline loaded on worker")
+
+        from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2_realtime import (
+            RealtimeSession,
+            Wan22RealtimePipeline,
+        )
+
+        rt_pipeline = Wan22RealtimePipeline(
+            transformer=pipeline.transformer,
+            vae=pipeline.vae,
+            tokenizer=pipeline.tokenizer,
+            text_encoder=pipeline.text_encoder,
+            num_frames_per_block=config.get("num_frames_per_block", 1),
+            kv_cache_num_frames=config.get("kv_cache_num_frames", 12),
+            vae_dtype=torch.float32,
+            transformer_dtype=next(pipeline.transformer.parameters()).dtype,
+        )
+        session = RealtimeSession()
+        self._realtime_sessions[session_id] = (rt_pipeline, session)
+        logger.info("Worker %d: Created realtime session %s", self.rank, session_id)
+        return True
+
+    @torch.no_grad()
+    def realtime_generate_block(
+        self,
+        session_id: str,
+        prompt: str,
+        height: int = 480,
+        width: int = 832,
+        num_inference_steps: int | None = None,
+        video_frames_bytes: list[bytes] | None = None,
+    ) -> bytes:
+        """Generate one video block, return PNG frame bytes."""
+        if not hasattr(self, "_realtime_sessions"):
+            raise RuntimeError(f"No realtime sessions; session {session_id} not found")
+        if session_id not in self._realtime_sessions:
+            raise RuntimeError(f"Realtime session {session_id} not found")
+
+        rt_pipeline, session = self._realtime_sessions[session_id]
+
+        input_frames = None
+        if video_frames_bytes:
+            import io as _io
+
+            from PIL import Image
+
+            input_frames = [
+                Image.open(_io.BytesIO(b)).convert("RGB")
+                for b in video_frames_bytes
+            ]
+
+        video_np = rt_pipeline.generate_block(
+            session=session,
+            prompt=prompt,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            input_video_frames=input_frames,
+        )
+
+        return self._encode_frame_png(video_np)
+
+    def realtime_dispose_session(self, session_id: str) -> bool:
+        """Dispose a realtime session and free GPU resources."""
+        if not hasattr(self, "_realtime_sessions"):
+            return True
+        entry = self._realtime_sessions.pop(session_id, None)
+        if entry is not None:
+            _, session = entry
+            session.dispose()
+            logger.info("Worker %d: Disposed realtime session %s", self.rank, session_id)
+        return True
+
+    @staticmethod
+    def _encode_frame_png(video_np) -> bytes:
+        """Encode video numpy array's first frame to PNG bytes."""
+        import io as _io
+
+        import numpy as np
+        from PIL import Image
+
+        if video_np.ndim == 5:
+            video_np = video_np[0]
+        if video_np.ndim == 4:
+            frame = video_np[0]
+        else:
+            frame = video_np
+        if frame.dtype in (np.float32, np.float64):
+            frame = (frame * 255).clip(0, 255).astype(np.uint8)
+        img = Image.fromarray(frame)
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
     def sleep(self, level: int = 1) -> bool:
         """
         Put the worker to sleep, offloading model weights.
@@ -395,11 +501,13 @@ class WorkerProc:
         od_config: OmniDiffusionConfig,
         gpu_id: int,
         broadcast_handle,
+        wake_event: mp.Event = None,
         worker_extension_cls: str | None = None,
         custom_pipeline_args: dict[str, Any] | None = None,
     ):
         self.od_config = od_config
         self.gpu_id = gpu_id
+        self.wake_event = wake_event
 
         # Inter-process Communication
         self.context = zmq.Context(io_threads=2)
@@ -414,7 +522,13 @@ class WorkerProc:
         if gpu_id == 0:
             self.result_mq = MessageQueue(n_reader=1, n_local_reader=1, local_reader_ranks=[0])
             self.result_mq_handle = self.result_mq.export_handle()
+            WorkerProc._shared_result_handle = self.result_mq_handle
             logger.info(f"Worker {gpu_id} created result MessageQueue")
+        else:
+            handle = getattr(WorkerProc, "_shared_result_handle", None)
+            if handle:
+                self.result_mq = MessageQueue.create_from_handle(handle, gpu_id)
+                logger.info(f"Worker {gpu_id} attached to shared result MessageQueue")
 
         assert od_config.master_port is not None
 
@@ -538,6 +652,7 @@ class WorkerProc:
         od_config: OmniDiffusionConfig,
         pipe_writer: mp.connection.Connection,
         broadcast_handle,
+        wake_event: mp.Event = None,
         worker_extension_cls: str | None = None,
         custom_pipeline_args: dict[str, Any] | None = None,
     ) -> None:
@@ -549,6 +664,7 @@ class WorkerProc:
             od_config,
             gpu_id=rank,
             broadcast_handle=broadcast_handle,
+            wake_event=wake_event,
             worker_extension_cls=worker_extension_cls,
             custom_pipeline_args=custom_pipeline_args,
         )

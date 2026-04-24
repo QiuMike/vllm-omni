@@ -117,6 +117,9 @@ def load_transformer_config(model_path: str, subfolder: str = "transformer", loc
 
 def _is_causal_config(config: dict) -> bool:
     """Detect if config describes a causal WanVideo model."""
+    cls_name = config.get("_class_name", "")
+    if "Causal" in cls_name or "causal" in cls_name.lower():
+        return True
     return config.get("causal", False) or "local_attn_size" in config or "num_frame_per_block" in config
 
 
