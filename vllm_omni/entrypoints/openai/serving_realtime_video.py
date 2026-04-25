@@ -45,8 +45,7 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_TIMEOUT = 30.0
 _FRAME_WAIT_INTERVAL = 0.01
-_FIRST_BLOCK_ENCODE_FRAMES = 9
-_NEXT_BLOCK_ENCODE_FRAMES = 12
+_VAE_TEMPORAL_COMPRESSION = 4
 
 
 class GenerateSession:
@@ -63,15 +62,18 @@ class GenerateSession:
         self.height: int = 480
         self.width: int = 832
         self.num_inference_steps: int | None = None
+        self.num_frames_per_block: int = 3
         self.action_queue: deque = deque(maxlen=1)
         self.video_frame_queue: deque = deque(maxlen=256)
         self.generate_chunk_cnt: int = 0
 
     @property
     def required_video_frames(self) -> int:
+        n = self.num_frames_per_block
+        r = _VAE_TEMPORAL_COMPRESSION
         if self.generate_chunk_cnt == 0:
-            return _FIRST_BLOCK_ENCODE_FRAMES
-        return _NEXT_BLOCK_ENCODE_FRAMES
+            return (n - 1) * r + 1
+        return n * r
 
     def has_pending_video_frames(self) -> bool:
         return len(self.video_frame_queue) >= self.required_video_frames
@@ -156,6 +158,7 @@ class RealtimeVideoHandler:
             session.height = config.get("height", 480)
             session.width = config.get("width", 832)
             session.num_inference_steps = config.get("num_inference_steps")
+            session.num_frames_per_block = config.get("num_frames_per_block", 3)
 
             if session.mode == "t2v" and config.get("first_frame"):
                 await self._send_error(
