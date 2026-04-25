@@ -373,7 +373,7 @@ class DiffusionWorker:
                     return self._encode_all_frames_png(video_np)
                 return []
 
-            prev_frames = self._sync_pending_vae(session_id, rt_pipeline)
+            self._sync_and_start_encode(session_id, rt_pipeline)
 
             latents = rt_pipeline.denoise_block(
                 session=session,
@@ -390,23 +390,57 @@ class DiffusionWorker:
                     session_id, rt_pipeline, session, block_idx, latents
                 )
 
-            return prev_frames
+            return self._collect_encoded_frames(session_id)
 
-    def _sync_pending_vae(
+    def _sync_and_start_encode(
         self, session_id: str, rt_pipeline
-    ) -> list[bytes]:
-        """Sync pending async VAE decode and return encoded frames."""
+    ) -> None:
+        """Sync VAE stream and submit CPU encode work to a background thread.
+
+        Must be called before denoise_block so that session state written
+        by decode_block on the VAE stream is visible. The heavy CPU work
+        (postprocess + PNG encode) runs in a thread that overlaps with
+        the subsequent GPU denoise.
+        """
         if not hasattr(self, "_pending_vae_decode"):
-            return []
+            return
         pending = self._pending_vae_decode.pop(session_id, None)
         if pending is None:
-            return []
+            return
 
         pending["stream"].synchronize()
+
         if self.rank == 0:
-            video_np = rt_pipeline.postprocess_decoded(pending["video_tensor"])
-            return self._encode_all_frames_png(video_np)
-        return []
+            video_tensor_cpu = pending["video_tensor"].cpu()
+
+            if not hasattr(self, "_encode_executor"):
+                from concurrent.futures import ThreadPoolExecutor
+
+                self._encode_executor = ThreadPoolExecutor(max_workers=1)
+            if not hasattr(self, "_pending_png_future"):
+                self._pending_png_future: dict = {}
+
+            self._pending_png_future[session_id] = (
+                self._encode_executor.submit(
+                    self._postprocess_and_encode,
+                    rt_pipeline,
+                    video_tensor_cpu,
+                )
+            )
+
+    def _collect_encoded_frames(self, session_id: str) -> list[bytes]:
+        """Collect PNG bytes from the background encode thread."""
+        if not hasattr(self, "_pending_png_future"):
+            return []
+        future = self._pending_png_future.pop(session_id, None)
+        if future is None:
+            return []
+        return future.result()
+
+    @staticmethod
+    def _postprocess_and_encode(rt_pipeline, video_tensor_cpu) -> list[bytes]:
+        video_np = rt_pipeline.postprocess_decoded(video_tensor_cpu)
+        return DiffusionWorker._encode_all_frames_png(video_np)
 
     def _launch_async_vae(
         self,
@@ -440,13 +474,25 @@ class DiffusionWorker:
 
     def realtime_flush_decode(self, session_id: str) -> list[bytes]:
         """Flush pending VAE decode and return last block's frames."""
+        frames = self._collect_encoded_frames(session_id)
         if not hasattr(self, "_realtime_sessions"):
-            return []
+            return frames
         entry = self._realtime_sessions.get(session_id)
         if entry is None:
-            return []
-        rt_pipeline = entry[0]
-        return self._sync_pending_vae(session_id, rt_pipeline)
+            return frames
+        if not hasattr(self, "_pending_vae_decode"):
+            return frames
+        pending = self._pending_vae_decode.pop(session_id, None)
+        if pending is None:
+            return frames
+        pending["stream"].synchronize()
+        if self.rank == 0:
+            rt_pipeline = entry[0]
+            video_np = rt_pipeline.postprocess_decoded(
+                pending["video_tensor"]
+            )
+            frames.extend(self._encode_all_frames_png(video_np))
+        return frames
 
     def realtime_dispose_session(self, session_id: str) -> bool:
         """Dispose a realtime session and free GPU resources."""
