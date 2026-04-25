@@ -299,8 +299,8 @@ class DiffusionWorker:
             vae=pipeline.vae,
             tokenizer=pipeline.tokenizer,
             text_encoder=pipeline.text_encoder,
-            num_frames_per_block=config.get("num_frames_per_block", 1),
-            kv_cache_num_frames=config.get("kv_cache_num_frames", 12),
+            num_frames_per_block=config.get("num_frames_per_block", 3),
+            kv_cache_num_frames=config.get("kv_cache_num_frames", 3),
             vae_dtype=torch.float32,
             transformer_dtype=next(pipeline.transformer.parameters()).dtype,
         )
@@ -318,8 +318,8 @@ class DiffusionWorker:
         width: int = 832,
         num_inference_steps: int | None = None,
         video_frames_bytes: list[bytes] | None = None,
-    ) -> bytes:
-        """Generate one video block, return PNG frame bytes."""
+    ) -> list[bytes]:
+        """Generate one video block, return list of PNG frame bytes."""
         if not hasattr(self, "_realtime_sessions"):
             raise RuntimeError(f"No realtime sessions; session {session_id} not found")
         if session_id not in self._realtime_sessions:
@@ -347,7 +347,7 @@ class DiffusionWorker:
             input_video_frames=input_frames,
         )
 
-        return self._encode_frame_png(video_np)
+        return self._encode_all_frames_png(video_np)
 
     def realtime_dispose_session(self, session_id: str) -> bool:
         """Dispose a realtime session and free GPU resources."""
@@ -361,8 +361,8 @@ class DiffusionWorker:
         return True
 
     @staticmethod
-    def _encode_frame_png(video_np) -> bytes:
-        """Encode video numpy array's first frame to PNG bytes."""
+    def _encode_all_frames_png(video_np) -> list[bytes]:
+        """Encode all video frames to a list of PNG bytes."""
         import io as _io
 
         import numpy as np
@@ -370,16 +370,18 @@ class DiffusionWorker:
 
         if video_np.ndim == 5:
             video_np = video_np[0]
-        if video_np.ndim == 4:
-            frame = video_np[0]
-        else:
-            frame = video_np
-        if frame.dtype in (np.float32, np.float64):
-            frame = (frame * 255).clip(0, 255).astype(np.uint8)
-        img = Image.fromarray(frame)
-        buf = _io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
+        if video_np.ndim == 3:
+            video_np = video_np[np.newaxis]
+
+        result = []
+        for frame in video_np:
+            if frame.dtype in (np.float32, np.float64):
+                frame = (frame * 255).clip(0, 255).astype(np.uint8)
+            img = Image.fromarray(frame)
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            result.append(buf.getvalue())
+        return result
 
     def sleep(self, level: int = 1) -> bool:
         """

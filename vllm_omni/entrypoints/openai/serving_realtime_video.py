@@ -167,8 +167,8 @@ class RealtimeVideoHandler:
                 "realtime_create_session",
                 session.id,
                 {
-                    "num_frames_per_block": config.get("num_frames_per_block", 1),
-                    "kv_cache_num_frames": config.get("kv_cache_num_frames", 12),
+                    "num_frames_per_block": config.get("num_frames_per_block", 3),
+                    "kv_cache_num_frames": config.get("kv_cache_num_frames", 3),
                 },
             )
             worker_session_created = True
@@ -263,7 +263,7 @@ class RealtimeVideoHandler:
                     continue
 
             try:
-                frame_bytes = await self._rpc(
+                result = await self._rpc(
                     "realtime_generate_block",
                     session.id,
                     prompt,
@@ -273,7 +273,11 @@ class RealtimeVideoHandler:
                     video_frames_bytes,
                 )
 
-                await self._send_frame(websocket, frame_bytes)
+                if isinstance(result, list):
+                    for frame_bytes in result:
+                        await self._send_frame(websocket, frame_bytes)
+                else:
+                    await self._send_frame(websocket, result)
                 session.generate_chunk_completed()
 
             except Exception as e:
