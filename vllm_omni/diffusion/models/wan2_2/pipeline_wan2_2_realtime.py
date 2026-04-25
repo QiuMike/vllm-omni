@@ -126,8 +126,12 @@ class Wan22RealtimePipeline:
             dtype=vae_dtype,
         ).view(1, self.vae.config.z_dim, 1, 1, 1)
 
-        p_t, p_h, p_w = transformer.config.patch_size
-        self.frame_seq_length = (480 // p_h // 8) * (832 // p_w // 8)
+        self._patch_size = transformer.config.patch_size
+        self.frame_seq_length = self._compute_frame_seq_length(480, 832)
+
+    def _compute_frame_seq_length(self, height: int, width: int) -> int:
+        _, p_h, p_w = self._patch_size
+        return (height // p_h // 8) * (width // p_w // 8)
 
     @property
     def device(self) -> torch.device:
@@ -456,6 +460,13 @@ class Wan22RealtimePipeline:
         """
         if num_inference_steps is None:
             num_inference_steps = self.DEFAULT_NUM_INFERENCE_STEPS
+
+        # 0. Update frame_seq_length for actual resolution
+        new_seq_len = self._compute_frame_seq_length(height, width)
+        if new_seq_len != self.frame_seq_length:
+            self.frame_seq_length = new_seq_len
+            if session.kv_cache_manager is not None:
+                session.kv_cache_manager = None
 
         block_idx = session.block_idx
         has_video = input_video_frames is not None

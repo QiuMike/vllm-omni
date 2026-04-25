@@ -82,6 +82,7 @@ async def run_t2v_interactive(args):
             "height": args.height,
             "width": args.width,
             "num_inference_steps": args.steps,
+            "num_frames_per_block": args.frames_per_block,
         }
         await ws.send(pack_msg(config))
         print(f"Config: prompt='{args.prompt}', "
@@ -219,6 +220,7 @@ async def run_t2v_batch(args):
             "height": args.height,
             "width": args.width,
             "num_inference_steps": args.steps,
+            "num_frames_per_block": args.frames_per_block,
         }
         await ws.send(pack_msg(config))
         print(f"Sent config: mode=t2v, prompt='{args.prompt}', "
@@ -364,13 +366,18 @@ async def run_v2v_test(args):
         return
 
     # Load frames from video file or generate random ones
+    vae_t = 4  # VAE temporal compression ratio
+    n = args.frames_per_block
+    first_block_frames = (n - 1) * vae_t + 1
+    next_block_frames = n * vae_t
+
     if args.video:
         all_frames = load_video_frames(args.video, args.height, args.width)
         if not all_frames:
             return
     else:
         print("No --video provided, using random dummy frames")
-        total_needed = 9 + 12 * max(args.blocks - 1, 0)
+        total_needed = first_block_frames + next_block_frames * max(args.blocks - 1, 0)
         all_frames = make_random_frames(
             total_needed, args.height, args.width
         )
@@ -383,6 +390,7 @@ async def run_v2v_test(args):
             "height": args.height,
             "width": args.width,
             "num_inference_steps": args.steps,
+            "num_frames_per_block": args.frames_per_block,
         }
         await ws.send(pack_msg(config))
         print(f"Sent config: mode=v2v, prompt='{args.prompt}'")
@@ -395,8 +403,6 @@ async def run_v2v_test(args):
         if args.save_dir:
             os.makedirs(args.save_dir, exist_ok=True)
 
-        first_block_frames = 9
-        next_block_frames = 12
         cursor = 0
 
         block_count = 0
@@ -545,6 +551,8 @@ def main():
                         help="Directory to save output frames as PNG")
     parser.add_argument("--video", default=None,
                         help="[v2v] Path to input video file (mp4/avi/...)")
+    parser.add_argument("--frames-per-block", type=int, default=3,
+                        help="num_frames_per_block (latent frames per block)")
 
     args = parser.parse_args()
 
