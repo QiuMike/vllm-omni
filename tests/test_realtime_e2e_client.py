@@ -15,10 +15,15 @@ Usage:
     # Save output frames to disk:
     python tests/test_realtime_e2e_client.py -i --save-dir /tmp/frames
 
-    # V2V mode:
+    # V2V mode with local video input:
+    python tests/test_realtime_e2e_client.py --mode v2v --video input.mp4 \
+        --blocks 5 --prompt "anime style" --save-dir /tmp/v2v_out
+
+    # V2V mode with random frames (no video file):
     python tests/test_realtime_e2e_client.py --mode v2v --blocks 5
 
 Requires: pip install websockets msgpack Pillow
+Optional: pip install opencv-python  (for V2V video file input)
 """
 
 import argparse
@@ -43,6 +48,11 @@ try:
     from PIL import Image
 except ImportError:
     Image = None
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 def pack_msg(msg: dict) -> bytes:
@@ -108,9 +118,13 @@ async def run_t2v_interactive(args):
         stdin_thread = threading.Thread(target=_read_stdin, daemon=True)
         stdin_thread.start()
 
+        block_count = 0
         frame_count = 0
+        block_frame_idx = 0
+        last_frame_time = None
         start_time = time.time()
         current_prompt = args.prompt
+        BLOCK_GAP_THRESHOLD = 1.0
 
         try:
             while True:
@@ -138,13 +152,21 @@ async def run_t2v_interactive(args):
                     continue
 
                 msg = unpack_msg(data)
-                elapsed = time.time() - start_time
+                now = time.time()
+                elapsed = now - start_time
 
                 if msg["type"] == "frame":
                     content = msg["content"]
+                    if last_frame_time is not None and (now - last_frame_time) > BLOCK_GAP_THRESHOLD:
+                        block_count += 1
+                        block_frame_idx = 0
+                    elif last_frame_time is None:
+                        pass
+                    last_frame_time = now
                     frame_count += 1
+                    block_frame_idx += 1
 
-                    parts = [f"Block {frame_count}",
+                    parts = [f"Block {block_count} Frame {block_frame_idx}",
                              f"{len(content)} bytes",
                              f"{elapsed:.1f}s"]
 
@@ -208,6 +230,7 @@ async def run_t2v_batch(args):
             f"Expected session_started, got: {msg}"
         print("Session started!")
 
+        block_count = 0
         frame_count = 0
         start_time = time.time()
 
@@ -216,9 +239,9 @@ async def run_t2v_batch(args):
 
         prompt_changed = False
 
-        while frame_count < args.blocks:
+        while block_count < args.blocks:
             if (args.change_prompt_at
-                    and frame_count == args.change_prompt_at
+                    and block_count == args.change_prompt_at
                     and not prompt_changed):
                 new_prompt = args.new_prompt or \
                     "A rocket launching into space with flames"
@@ -229,31 +252,48 @@ async def run_t2v_batch(args):
 
             data = await ws.recv()
             msg = unpack_msg(data)
-            elapsed = time.time() - start_time
 
             if msg["type"] == "frame":
-                content = msg["content"]
-                frame_count += 1
+                block_count += 1
+                block_frames = [msg["content"]]
 
-                info = f"Block {frame_count}/{args.blocks} | "
-                info += f"{len(content)} bytes | "
-                info += f"elapsed: {elapsed:.1f}s"
+                # Collect remaining frames of this block (sent rapidly)
+                try:
+                    while True:
+                        data = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        msg2 = unpack_msg(data)
+                        if msg2["type"] == "frame":
+                            block_frames.append(msg2["content"])
+                        elif msg2["type"] == "error":
+                            print(f"ERROR from server: {msg2['content']}")
+                            return
+                except asyncio.TimeoutError:
+                    pass
 
-                if Image is not None and isinstance(content, bytes):
-                    try:
-                        img = Image.open(io.BytesIO(content))
-                        info += f" | {img.size[0]}x{img.size[1]} {img.mode}"
+                elapsed = time.time() - start_time
+                for content in block_frames:
+                    frame_count += 1
+                    info = (f"Block {block_count}/{args.blocks} | "
+                            f"frame {frame_count} | "
+                            f"{len(content)} bytes | "
+                            f"elapsed: {elapsed:.1f}s")
 
-                        if args.save_dir:
-                            path = os.path.join(
-                                args.save_dir, f"frame_{frame_count:04d}.png"
-                            )
-                            img.save(path)
-                            info += f" | saved: {path}"
-                    except Exception as e:
-                        info += f" | decode err: {e}"
+                    if Image is not None and isinstance(content, bytes):
+                        try:
+                            img = Image.open(io.BytesIO(content))
+                            info += (f" | {img.size[0]}x{img.size[1]}"
+                                     f" {img.mode}")
+                            if args.save_dir:
+                                path = os.path.join(
+                                    args.save_dir,
+                                    f"frame_{frame_count:04d}.png",
+                                )
+                                img.save(path)
+                                info += f" | saved: {path}"
+                        except Exception as e:
+                            info += f" | decode err: {e}"
 
-                print(info)
+                    print(info)
 
             elif msg["type"] == "error":
                 print(f"ERROR from server: {msg['content']}")
@@ -263,8 +303,55 @@ async def run_t2v_batch(args):
                 print(f"Status: {msg['content']}")
 
         total = time.time() - start_time
-        print(f"\nDone! {frame_count} blocks in {total:.1f}s "
-              f"({frame_count / total:.2f} blocks/sec)")
+        print(f"\nDone! {block_count} blocks, {frame_count} frames "
+              f"in {total:.1f}s "
+              f"({block_count / total:.2f} blocks/sec)")
+
+
+def load_video_frames(video_path: str, height: int, width: int) -> list[bytes]:
+    """Load all frames from a video file as JPEG bytes."""
+    if cv2 is None:
+        print("ERROR: pip install opencv-python")
+        return []
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"ERROR: Cannot open video: {video_path}")
+        return []
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"Video: {video_path} | {total} frames | {fps:.1f} fps | "
+          f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+          f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
+
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.resize(frame, (width, height))
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        frames.append(buf.getvalue())
+    cap.release()
+    print(f"Loaded {len(frames)} frames, resized to {width}x{height}")
+    return frames
+
+
+def make_random_frames(count: int, height: int, width: int) -> list[bytes]:
+    """Generate random dummy frames as JPEG bytes."""
+    import numpy as np
+    frames = []
+    for _ in range(count):
+        arr = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+        img = Image.fromarray(arr)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        frames.append(buf.getvalue())
+    return frames
 
 
 async def run_v2v_test(args):
@@ -275,6 +362,18 @@ async def run_v2v_test(args):
     if Image is None:
         print("ERROR: Pillow is required for V2V test")
         return
+
+    # Load frames from video file or generate random ones
+    if args.video:
+        all_frames = load_video_frames(args.video, args.height, args.width)
+        if not all_frames:
+            return
+    else:
+        print("No --video provided, using random dummy frames")
+        total_needed = 9 + 12 * max(args.blocks - 1, 0)
+        all_frames = make_random_frames(
+            total_needed, args.height, args.width
+        )
 
     async with websockets.connect(uri, max_size=50 * 1024 * 1024) as ws:
         config = {
@@ -293,68 +392,126 @@ async def run_v2v_test(args):
         assert msg["type"] == "status" and msg["content"] == "session_started"
         print("Session started!")
 
-        import numpy as np
-        num_input_frames = 12
-        print(f"Sending {num_input_frames} dummy input frames...")
+        if args.save_dir:
+            os.makedirs(args.save_dir, exist_ok=True)
 
-        frames_bytes = []
-        for i in range(num_input_frames):
-            arr = np.random.randint(
-                0, 255, (args.height, args.width, 3), dtype=np.uint8
-            )
-            img = Image.fromarray(arr)
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=80)
-            frames_bytes.append(buf.getvalue())
+        first_block_frames = 9
+        next_block_frames = 12
+        cursor = 0
 
-        video_msg = {"type": "video", "frames": frames_bytes}
-        await ws.send(pack_msg(video_msg))
-        print(f"Sent {num_input_frames} frames")
-
-        frame_count = 0
+        block_count = 0
+        output_frame_idx = 0
         start = time.time()
 
-        while frame_count < args.blocks:
-            if frame_count > 0:
-                more_frames = []
-                for _ in range(12):
-                    arr = np.random.randint(
-                        0, 255, (args.height, args.width, 3), dtype=np.uint8
-                    )
-                    img = Image.fromarray(arr)
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=80)
-                    more_frames.append(buf.getvalue())
-                await ws.send(
-                    pack_msg({"type": "video", "frames": more_frames})
-                )
+        while block_count < args.blocks:
+            # Determine how many input frames this block needs
+            needed = first_block_frames if block_count == 0 else next_block_frames
 
-            data = await ws.recv()
-            msg = unpack_msg(data)
+            # Sample frames from the loaded video
+            if cursor + needed <= len(all_frames):
+                batch = all_frames[cursor:cursor + needed]
+                cursor += needed
+            elif cursor < len(all_frames):
+                # Not enough frames left — sample evenly from remaining
+                remaining = all_frames[cursor:]
+                import numpy as np
+                indices = np.round(
+                    np.linspace(0, len(remaining) - 1, needed)
+                ).astype(int)
+                batch = [remaining[i] for i in indices]
+                cursor = len(all_frames)
+            else:
+                # Video exhausted — loop from the beginning
+                cursor = 0
+                batch = all_frames[:needed]
+                cursor = needed
+                print(f"  (video looped)")
 
-            if msg["type"] == "frame":
-                frame_count += 1
-                content = msg["content"]
-                elapsed = time.time() - start
-                print(f"V2V Block {frame_count}/{args.blocks} | "
-                      f"{len(content)} bytes | {elapsed:.1f}s")
+            await ws.send(pack_msg({"type": "video", "frames": batch}))
 
-                if args.save_dir and Image is not None:
+            # Receive output frame(s) for this block
+            block_received = False
+            while not block_received:
+                data = await ws.recv()
+                msg = unpack_msg(data)
+
+                if msg["type"] == "frame":
+                    output_frame_idx += 1
+                    content = msg["content"]
+                    elapsed = time.time() - start
+
+                    parts = [f"Block {block_count + 1}/{args.blocks}",
+                             f"frame {output_frame_idx}",
+                             f"{len(content)} bytes",
+                             f"{elapsed:.1f}s"]
+
+                    if Image is not None and isinstance(content, bytes):
+                        try:
+                            img = Image.open(io.BytesIO(content))
+                            parts.append(f"{img.size[0]}x{img.size[1]}")
+                            if args.save_dir:
+                                path = os.path.join(
+                                    args.save_dir,
+                                    f"v2v_frame_{output_frame_idx:04d}.png",
+                                )
+                                img.save(path)
+                                parts.append(f"saved:{path}")
+                        except Exception as e:
+                            parts.append(f"decode err: {e}")
+
+                    print(f"  {' | '.join(parts)}")
+
+                    # After receiving frames, check if more are pending
+                    # Use a short timeout to collect all frames from this block
                     try:
-                        img = Image.open(io.BytesIO(content))
-                        path = os.path.join(
-                            args.save_dir, f"v2v_frame_{frame_count:04d}.png"
-                        )
-                        img.save(path)
-                    except Exception:
+                        while True:
+                            data = await asyncio.wait_for(
+                                ws.recv(), timeout=0.5
+                            )
+                            msg2 = unpack_msg(data)
+                            if msg2["type"] == "frame":
+                                output_frame_idx += 1
+                                content2 = msg2["content"]
+                                parts2 = [
+                                    f"Block {block_count + 1}/{args.blocks}",
+                                    f"frame {output_frame_idx}",
+                                    f"{len(content2)} bytes",
+                                    f"{time.time() - start:.1f}s",
+                                ]
+                                if args.save_dir and Image is not None:
+                                    try:
+                                        img2 = Image.open(
+                                            io.BytesIO(content2)
+                                        )
+                                        parts2.append(
+                                            f"{img2.size[0]}x{img2.size[1]}"
+                                        )
+                                        path2 = os.path.join(
+                                            args.save_dir,
+                                            f"v2v_frame_{output_frame_idx:04d}"
+                                            ".png",
+                                        )
+                                        img2.save(path2)
+                                        parts2.append(f"saved:{path2}")
+                                    except Exception:
+                                        pass
+                                print(f"  {' | '.join(parts2)}")
+                            elif msg2["type"] == "error":
+                                print(f"ERROR: {msg2['content']}")
+                                return
+                    except asyncio.TimeoutError:
                         pass
 
-            elif msg["type"] == "error":
-                print(f"ERROR: {msg['content']}")
-                break
+                    block_received = True
+                    block_count += 1
+
+                elif msg["type"] == "error":
+                    print(f"ERROR: {msg['content']}")
+                    return
 
         total = time.time() - start
-        print(f"\nV2V done! {frame_count} blocks in {total:.1f}s")
+        print(f"\nV2V done! {block_count} blocks, {output_frame_idx} output "
+              f"frames in {total:.1f}s")
 
 
 def main():
@@ -386,6 +543,8 @@ def main():
                         help="[batch] New prompt for --change-prompt-at")
     parser.add_argument("--save-dir", default=None,
                         help="Directory to save output frames as PNG")
+    parser.add_argument("--video", default=None,
+                        help="[v2v] Path to input video file (mp4/avi/...)")
 
     args = parser.parse_args()
 
