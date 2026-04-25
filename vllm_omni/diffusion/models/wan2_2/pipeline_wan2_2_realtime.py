@@ -461,7 +461,14 @@ class Wan22RealtimePipeline:
         if num_inference_steps is None:
             num_inference_steps = self.DEFAULT_NUM_INFERENCE_STEPS
 
-        # 0. Update frame_seq_length for actual resolution
+        # 0. Align resolution to required factor (VAE 8x × patch 2x = 16)
+        _, p_h, p_w = self._patch_size
+        align_h = 8 * p_h
+        align_w = 8 * p_w
+        height = (height // align_h) * align_h
+        width = (width // align_w) * align_w
+
+        # Update frame_seq_length for actual resolution
         new_seq_len = self._compute_frame_seq_length(height, width)
         if new_seq_len != self.frame_seq_length:
             self.frame_seq_length = new_seq_len
