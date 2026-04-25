@@ -100,8 +100,8 @@ class Wan22RealtimePipeline:
         tokenizer,
         text_encoder,
         *,
-        num_frames_per_block: int = 1,
-        kv_cache_num_frames: int = 12,
+        num_frames_per_block: int = 3,
+        kv_cache_num_frames: int = 3,
         vae_dtype: torch.dtype = torch.bfloat16,
         transformer_dtype: torch.dtype = torch.bfloat16,
     ):
@@ -198,21 +198,28 @@ class Wan22RealtimePipeline:
     ) -> list[list[torch.Tensor]]:
         """Interpolate between previous and current prompt embeddings.
 
-        Skips weight=0 (which equals the previous embed) so the first block
-        after a prompt change already shows new-prompt influence.
+        Weights start at 1/steps (not 0) so the first block after a prompt
+        change already shows new-prompt influence.  All steps are computed
+        in a single vectorised ``torch.lerp`` call per embedding layer.
         """
         steps = self.INTERPOLATION_STEPS
-        result = []
-        # Weights: [1/steps, 2/steps, ..., 1.0] e.g. [0.25, 0.5, 0.75, 1.0]
-        weights = torch.linspace(1.0 / steps, 1.0, steps=steps)
+        assert len(prev_embeds) == len(curr_embeds)
 
+        weights = (
+            torch.linspace(1.0 / steps, 1.0, steps=steps)
+            .unsqueeze(1)
+            .unsqueeze(2)
+        )
+
+        per_layer_chunks: list[list[torch.Tensor]] = []
+        for prev, curr in zip(prev_embeds, curr_embeds):
+            assert prev.shape == curr.shape
+            x = torch.lerp(prev, curr, weights.to(prev))
+            per_layer_chunks.append(list(x.chunk(steps, dim=0)))
+
+        result: list[list[torch.Tensor]] = []
         for step_idx in range(steps):
-            w = weights[step_idx]
-            step_embeds = []
-            for prev, curr in zip(prev_embeds, curr_embeds):
-                interp = torch.lerp(prev, curr, w.to(prev))
-                step_embeds.append(interp)
-            result.append(step_embeds)
+            result.append([chunks[step_idx] for chunks in per_layer_chunks])
         return result
 
     def prepare_timesteps(
@@ -607,7 +614,14 @@ class Wan22RealtimePipeline:
         block_idx: int,
         latents: torch.Tensor,
     ) -> np.ndarray:
-        """Decode latents to video frames via VAE."""
+        """Decode latents to video frames via VAE.
+
+        Performs frame-by-frame decoding directly instead of going through
+        vae.decode(), which always passes first_chunk=True for frame 0.
+        In realtime streaming, only block 0 frame 0 is the true first chunk;
+        subsequent blocks must use first_chunk=False to keep temporal
+        upsampling consistent with the cached decoder state.
+        """
         if session.frame_cache_context is None:
             frame_cache_len = 1 + (self.kv_cache_num_frames - 1) * 4
             session.frame_cache_context = deque(maxlen=frame_cache_len)
@@ -625,8 +639,42 @@ class Wan22RealtimePipeline:
         decode_latents = latents.to(device=self.vae.device, dtype=self.vae_dtype)
         decode_latents = decode_latents / self._vae_latents_std + self._vae_latents_mean
 
-        decode_out = self.vae.decode(decode_latents)
-        videos = decode_out.sample if hasattr(decode_out, "sample") else decode_out
+        from contextlib import nullcontext
+
+        ctx = (
+            self.vae._execution_context()
+            if hasattr(self.vae, "_execution_context")
+            else nullcontext()
+        )
+        with ctx:
+            x = self.vae.post_quant_conv(decode_latents)
+            num_frames = x.shape[2]
+
+            for i in range(num_frames):
+                self.vae._conv_idx = [0]
+                is_first_chunk = block_idx == 0 and i == 0
+                frame = x[:, :, i : i + 1, :, :]
+                decoded = self.vae.decoder(
+                    frame,
+                    feat_cache=self.vae._feat_map,
+                    feat_idx=self.vae._conv_idx,
+                    first_chunk=is_first_chunk,
+                )
+                if i == 0:
+                    videos = decoded
+                else:
+                    videos = torch.cat([videos, decoded], dim=2)
+
+            patch_size = getattr(self.vae.config, "patch_size", None)
+            if patch_size is not None:
+                from diffusers.models.autoencoders.autoencoder_kl_wan import (
+                    unpatchify,
+                )
+
+                videos = unpatchify(videos, patch_size=patch_size)
+
+            videos = torch.clamp(videos, min=-1.0, max=1.0)
+
         session.decoder_cache = self.vae._feat_map
         session.frame_cache_context.extend(videos.split(1, dim=2))
 
