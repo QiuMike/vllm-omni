@@ -44,6 +44,7 @@ class RealtimeSession:
     current_denoised_latents: torch.Tensor | None = None
     frame_cache_context: deque | None = None
     decoder_cache: Any = None
+    v2v_strength: float | None = None
     block_idx: int = 0
 
     def is_prompt_changed(self, prompts: str | list[str]) -> bool:
@@ -466,7 +467,7 @@ class Wan22RealtimePipeline:
 
         block_idx = session.block_idx
         has_video = input_video_frames is not None
-        strength = 0.7 if has_video else 1.0
+        strength = (session.v2v_strength or 0.7) if has_video else 1.0
 
         prompt_embeds = self._encode_with_interpolation(session, prompt)
 

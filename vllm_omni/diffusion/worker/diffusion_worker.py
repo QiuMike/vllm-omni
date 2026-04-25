@@ -304,7 +304,9 @@ class DiffusionWorker:
             vae_dtype=torch.float32,
             transformer_dtype=next(pipeline.transformer.parameters()).dtype,
         )
-        session = RealtimeSession()
+        session = RealtimeSession(
+            v2v_strength=config.get("v2v_strength"),
+        )
         seed = config.get("seed", 42)
         generator = torch.Generator(device=self.device).manual_seed(seed)
         self._realtime_sessions[session_id] = (rt_pipeline, session, generator)

@@ -395,8 +395,11 @@ async def run_v2v_test(args):
             "num_inference_steps": args.steps,
             "num_frames_per_block": args.frames_per_block,
         }
+        if args.strength is not None:
+            config["v2v_strength"] = args.strength
         await ws.send(pack_msg(config))
-        print(f"Sent config: mode=v2v, prompt='{args.prompt}'")
+        print(f"Sent config: mode=v2v, prompt='{args.prompt}'"
+              f"{f', strength={args.strength}' if args.strength else ''}")
 
         data = await ws.recv()
         msg = unpack_msg(data)
@@ -546,6 +549,8 @@ def main():
                         help="[v2v] Path to input video file (mp4/avi/...)")
     parser.add_argument("--frames-per-block", type=int, default=3,
                         help="num_frames_per_block (latent frames per block)")
+    parser.add_argument("--strength", type=float, default=None,
+                        help="[v2v] V2V strength (0.0-1.0, lower preserves more)")
 
     args = parser.parse_args()
 
