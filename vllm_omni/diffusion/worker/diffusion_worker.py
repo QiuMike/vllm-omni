@@ -319,7 +319,13 @@ class DiffusionWorker:
         num_inference_steps: int | None = None,
         video_frames_bytes: list[bytes] | None = None,
     ) -> list[bytes]:
-        """Generate one video block, return list of PNG frame bytes."""
+        """Generate one video block, return list of PNG frame bytes.
+
+        All TP ranks execute the transformer forward pass (which requires
+        collective communication).  VAE decode runs on every rank (it is
+        not sharded) but PNG encoding is only performed on rank 0 — the
+        only rank whose result is returned to the API server.
+        """
         if not hasattr(self, "_realtime_sessions"):
             raise RuntimeError(f"No realtime sessions; session {session_id} not found")
         if session_id not in self._realtime_sessions:
@@ -338,16 +344,22 @@ class DiffusionWorker:
                 for b in video_frames_bytes
             ]
 
-        video_np = rt_pipeline.generate_block(
-            session=session,
-            prompt=prompt,
-            height=height,
-            width=width,
-            num_inference_steps=num_inference_steps,
-            input_video_frames=input_frames,
-        )
+        with (
+            set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
+            set_current_vllm_config(self.vllm_config),
+        ):
+            video_np = rt_pipeline.generate_block(
+                session=session,
+                prompt=prompt,
+                height=height,
+                width=width,
+                num_inference_steps=num_inference_steps,
+                input_video_frames=input_frames,
+            )
 
-        return self._encode_all_frames_png(video_np)
+        if self.rank == 0:
+            return self._encode_all_frames_png(video_np)
+        return []
 
     def realtime_dispose_session(self, session_id: str) -> bool:
         """Dispose a realtime session and free GPU resources."""
