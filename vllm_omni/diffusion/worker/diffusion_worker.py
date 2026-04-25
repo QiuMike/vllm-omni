@@ -321,15 +321,17 @@ class DiffusionWorker:
         num_inference_steps: int | None = None,
         video_frames_bytes: list[bytes] | None = None,
     ) -> list[bytes]:
-        """Generate one video block, return list of PNG frame bytes.
+        """Generate one video block with VAE-denoise overlap.
 
-        All TP ranks execute the transformer forward pass (which requires
-        collective communication).  VAE decode runs on every rank (it is
-        not sharded) but PNG encoding is only performed on rank 0 — the
-        only rank whose result is returned to the API server.
+        First block runs synchronously for fast initial output.
+        Subsequent blocks pipeline: denoise(N) on default stream overlaps
+        with VAE decode(N-1) on a separate CUDA stream.
+        Non-rank-0 workers skip VAE entirely (it's replicated, not sharded).
         """
         if not hasattr(self, "_realtime_sessions"):
-            raise RuntimeError(f"No realtime sessions; session {session_id} not found")
+            raise RuntimeError(
+                f"No realtime sessions; session {session_id} not found"
+            )
         if session_id not in self._realtime_sessions:
             raise RuntimeError(f"Realtime session {session_id} not found")
 
@@ -346,11 +348,34 @@ class DiffusionWorker:
                 for b in video_frames_bytes
             ]
 
+        block_idx = session.block_idx
+        is_first_block = block_idx == 0
+
         with (
-            set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
+            set_forward_context(
+                vllm_config=self.vllm_config,
+                omni_diffusion_config=self.od_config,
+            ),
             set_current_vllm_config(self.vllm_config),
         ):
-            video_np = rt_pipeline.generate_block(
+            if is_first_block:
+                # Synchronous first block for fast initial output
+                video_np = rt_pipeline.generate_block(
+                    session=session,
+                    prompt=prompt,
+                    height=height,
+                    width=width,
+                    num_inference_steps=num_inference_steps,
+                    input_video_frames=input_frames,
+                    generator=generator,
+                )
+                if self.rank == 0:
+                    return self._encode_all_frames_png(video_np)
+                return []
+
+            prev_frames = self._sync_pending_vae(session_id, rt_pipeline)
+
+            latents = rt_pipeline.denoise_block(
                 session=session,
                 prompt=prompt,
                 height=height,
@@ -360,19 +385,86 @@ class DiffusionWorker:
                 generator=generator,
             )
 
+            if self.rank == 0:
+                self._launch_async_vae(
+                    session_id, rt_pipeline, session, block_idx, latents
+                )
+
+            return prev_frames
+
+    def _sync_pending_vae(
+        self, session_id: str, rt_pipeline
+    ) -> list[bytes]:
+        """Sync pending async VAE decode and return encoded frames."""
+        if not hasattr(self, "_pending_vae_decode"):
+            return []
+        pending = self._pending_vae_decode.pop(session_id, None)
+        if pending is None:
+            return []
+
+        pending["stream"].synchronize()
         if self.rank == 0:
+            video_np = rt_pipeline.postprocess_decoded(pending["video_tensor"])
             return self._encode_all_frames_png(video_np)
         return []
+
+    def _launch_async_vae(
+        self,
+        session_id: str,
+        rt_pipeline,
+        session,
+        block_idx: int,
+        latents: torch.Tensor,
+    ) -> None:
+        """Launch VAE decode on a separate CUDA stream (non-blocking)."""
+        if not hasattr(self, "_pending_vae_decode"):
+            self._pending_vae_decode: dict[str, dict] = {}
+        if not hasattr(self, "_vae_streams"):
+            self._vae_streams: dict[str, torch.cuda.Stream] = {}
+
+        vae_stream = self._vae_streams.get(session_id)
+        if vae_stream is None:
+            vae_stream = torch.cuda.Stream()
+            self._vae_streams[session_id] = vae_stream
+
+        # Ensure denoise results on default stream are visible to vae_stream
+        vae_stream.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(vae_stream):
+            video_tensor = rt_pipeline.decode_block(session, block_idx, latents)
+
+        self._pending_vae_decode[session_id] = {
+            "stream": vae_stream,
+            "video_tensor": video_tensor,
+        }
+
+    def realtime_flush_decode(self, session_id: str) -> list[bytes]:
+        """Flush pending VAE decode and return last block's frames."""
+        if not hasattr(self, "_realtime_sessions"):
+            return []
+        entry = self._realtime_sessions.get(session_id)
+        if entry is None:
+            return []
+        rt_pipeline = entry[0]
+        return self._sync_pending_vae(session_id, rt_pipeline)
 
     def realtime_dispose_session(self, session_id: str) -> bool:
         """Dispose a realtime session and free GPU resources."""
         if not hasattr(self, "_realtime_sessions"):
             return True
+        # Flush any pending async VAE decode
+        self.realtime_flush_decode(session_id)
+        if hasattr(self, "_vae_streams"):
+            self._vae_streams.pop(session_id, None)
         entry = self._realtime_sessions.pop(session_id, None)
         if entry is not None:
             _, session, _ = entry
             session.dispose()
-            logger.info("Worker %d: Disposed realtime session %s", self.rank, session_id)
+            logger.info(
+                "Worker %d: Disposed realtime session %s",
+                self.rank,
+                session_id,
+            )
         return True
 
     @staticmethod

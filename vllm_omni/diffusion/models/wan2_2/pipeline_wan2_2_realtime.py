@@ -434,7 +434,7 @@ class Wan22RealtimePipeline:
         return noise_pred
 
     @torch.no_grad()
-    def generate_block(
+    def denoise_block(
         self,
         session: RealtimeSession,
         prompt: str,
@@ -443,32 +443,21 @@ class Wan22RealtimePipeline:
         num_inference_steps: int | None = None,
         input_video_frames: list | None = None,
         generator: torch.Generator | None = None,
-    ) -> np.ndarray:
-        """Generate one video block.
+    ) -> torch.Tensor:
+        """Run text encoding, latent prep, context recomputation, and denoising.
 
-        Args:
-            session: Persistent session state across blocks.
-            prompt: Text prompt for generation.
-            height: Video height in pixels.
-            width: Video width in pixels.
-            num_inference_steps: Denoising steps (default 4).
-            input_video_frames: PIL images for V2V mode (None for T2V).
-            generator: Optional random generator for reproducibility.
-
-        Returns:
-            Video frames as numpy array (postprocessed by VideoProcessor).
+        Returns denoised latents. Updates session.current_denoised_latents
+        and increments session.block_idx.
         """
         if num_inference_steps is None:
             num_inference_steps = self.DEFAULT_NUM_INFERENCE_STEPS
 
-        # 0. Align resolution to required factor (VAE 8x × patch 2x = 16)
         _, p_h, p_w = self._patch_size
         align_h = 8 * p_h
         align_w = 8 * p_w
         height = (height // align_h) * align_h
         width = (width // align_w) * align_w
 
-        # Update frame_seq_length for actual resolution
         new_seq_len = self._compute_frame_seq_length(height, width)
         if new_seq_len != self.frame_seq_length:
             self.frame_seq_length = new_seq_len
@@ -479,15 +468,12 @@ class Wan22RealtimePipeline:
         has_video = input_video_frames is not None
         strength = 0.7 if has_video else 1.0
 
-        # 1. Text encoding with prompt interpolation
         prompt_embeds = self._encode_with_interpolation(session, prompt)
 
-        # 2. Prepare timesteps
         timesteps, all_timesteps, sigmas = self.prepare_timesteps(
             self.DEFAULT_FLOW_SHIFT, strength, num_inference_steps
         )
 
-        # 3. Prepare latents
         if has_video:
             latents = self._prepare_v2v_latents(
                 input_video_frames, height, width, timesteps, generator
@@ -498,15 +484,11 @@ class Wan22RealtimePipeline:
             )
 
         current_start_frame = block_idx * self.num_frames_per_block
-
-        # 4. Setup KV cache
         manager = self._setup_kv_cache(session)
 
-        # 5. Context recomputation (for blocks after the first)
         if block_idx > 0:
             self._recompute_context(session, prompt_embeds, manager)
 
-        # 6. Denoising loop
         step_timestep_ids = torch.argmin(
             (all_timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1
         )
@@ -521,9 +503,7 @@ class Wan22RealtimePipeline:
                 crossattn_cache=manager.cross_attn_caches,
                 current_start_frame=current_start_frame,
             )
-
             latents = self._update_latents(latents, noise_pred, step_sigmas[i])
-
             if i < num_inference_steps - 1:
                 sample = latents.transpose(1, 2).squeeze(0)
                 noise = randn_tensor(
@@ -538,16 +518,113 @@ class Wan22RealtimePipeline:
                     .transpose(1, 2)
                 )
 
-        # 7. Save denoised latents
         session.current_denoised_latents = latents
-
-        # 8. VAE decode
-        videos = self._decode_latents(session, block_idx, latents)
-
-        # 9. Update session
         session.block_idx += 1
+        return latents
 
+    def decode_block(
+        self,
+        session: RealtimeSession,
+        block_idx: int,
+        latents: torch.Tensor,
+    ) -> torch.Tensor:
+        """VAE decode latents to video tensor. Updates session caches.
+
+        Returns clamped video tensor on GPU. Call postprocess_decoded()
+        to convert to numpy.
+        """
+        if session.frame_cache_context is None:
+            frame_cache_len = 1 + (self.kv_cache_num_frames - 1) * 4
+            session.frame_cache_context = deque(maxlen=frame_cache_len)
+
+        if block_idx == 0:
+            if not hasattr(self.vae, "_original_clear_cache"):
+                self.vae._original_clear_cache = self.vae.clear_cache
+            self.vae._original_clear_cache()
+            self.vae.clear_cache = lambda: None
+            decoder_cache_len = getattr(self.vae, "_conv_num", 55)
+            self.vae._feat_map = [None] * decoder_cache_len
+        else:
+            self.vae._feat_map = session.decoder_cache
+
+        decode_latents = latents.to(device=self.vae.device, dtype=self.vae_dtype)
+        decode_latents = (
+            decode_latents / self._vae_latents_std + self._vae_latents_mean
+        )
+
+        from contextlib import nullcontext
+
+        ctx = (
+            self.vae._execution_context()
+            if hasattr(self.vae, "_execution_context")
+            else nullcontext()
+        )
+
+        with ctx:
+            x = self.vae.post_quant_conv(decode_latents)
+            num_frames = x.shape[2]
+
+            for i in range(num_frames):
+                self.vae._conv_idx = [0]
+                is_first_chunk = block_idx == 0 and i == 0
+                frame = x[:, :, i : i + 1, :, :]
+                decoded = self.vae.decoder(
+                    frame,
+                    feat_cache=self.vae._feat_map,
+                    feat_idx=self.vae._conv_idx,
+                    first_chunk=is_first_chunk,
+                )
+                if i == 0:
+                    videos = decoded
+                else:
+                    videos = torch.cat([videos, decoded], dim=2)
+
+            patch_size = getattr(self.vae.config, "patch_size", None)
+            if patch_size is not None:
+                from diffusers.models.autoencoders.autoencoder_kl_wan import (
+                    unpatchify,
+                )
+
+                videos = unpatchify(videos, patch_size=patch_size)
+
+            videos = torch.clamp(videos, min=-1.0, max=1.0)
+
+        session.decoder_cache = self.vae._feat_map
+        session.frame_cache_context.extend(videos.split(1, dim=2))
         return videos
+
+    def postprocess_decoded(self, video_tensor: torch.Tensor) -> np.ndarray:
+        """Convert decoded video tensor to numpy array."""
+        return self.video_processor.postprocess_video(
+            video_tensor, output_type="np"
+        )
+
+    @torch.no_grad()
+    def generate_block(
+        self,
+        session: RealtimeSession,
+        prompt: str,
+        height: int = 480,
+        width: int = 832,
+        num_inference_steps: int | None = None,
+        input_video_frames: list | None = None,
+        generator: torch.Generator | None = None,
+    ) -> np.ndarray:
+        """Generate one video block (synchronous).
+
+        For async pipeline use denoise_block() + decode_block() +
+        postprocess_decoded() separately.
+        """
+        block_idx = session.block_idx
+
+        latents = self.denoise_block(
+            session, prompt, height, width,
+            num_inference_steps, input_video_frames, generator,
+        )
+
+        videos = self.decode_block(session, block_idx, latents)
+
+        return self.postprocess_decoded(videos)
 
     def _encode_with_interpolation(
         self,
@@ -626,74 +703,3 @@ class Wan22RealtimePipeline:
         end = start + self.num_frames_per_block
         return all_latents[:, :, start:end].contiguous()
 
-    def _decode_latents(
-        self,
-        session: RealtimeSession,
-        block_idx: int,
-        latents: torch.Tensor,
-    ) -> np.ndarray:
-        """Decode latents to video frames via VAE.
-
-        Performs frame-by-frame decoding directly instead of going through
-        vae.decode(), which always passes first_chunk=True for frame 0.
-        In realtime streaming, only block 0 frame 0 is the true first chunk;
-        subsequent blocks must use first_chunk=False to keep temporal
-        upsampling consistent with the cached decoder state.
-        """
-        if session.frame_cache_context is None:
-            frame_cache_len = 1 + (self.kv_cache_num_frames - 1) * 4
-            session.frame_cache_context = deque(maxlen=frame_cache_len)
-
-        if block_idx == 0:
-            if not hasattr(self.vae, "_original_clear_cache"):
-                self.vae._original_clear_cache = self.vae.clear_cache
-            self.vae._original_clear_cache()
-            self.vae.clear_cache = lambda: None
-            decoder_cache_len = getattr(self.vae, "_conv_num", 55)
-            self.vae._feat_map = [None] * decoder_cache_len
-        else:
-            self.vae._feat_map = session.decoder_cache
-
-        decode_latents = latents.to(device=self.vae.device, dtype=self.vae_dtype)
-        decode_latents = decode_latents / self._vae_latents_std + self._vae_latents_mean
-
-        from contextlib import nullcontext
-
-        ctx = (
-            self.vae._execution_context()
-            if hasattr(self.vae, "_execution_context")
-            else nullcontext()
-        )
-        with ctx:
-            x = self.vae.post_quant_conv(decode_latents)
-            num_frames = x.shape[2]
-
-            for i in range(num_frames):
-                self.vae._conv_idx = [0]
-                is_first_chunk = block_idx == 0 and i == 0
-                frame = x[:, :, i : i + 1, :, :]
-                decoded = self.vae.decoder(
-                    frame,
-                    feat_cache=self.vae._feat_map,
-                    feat_idx=self.vae._conv_idx,
-                    first_chunk=is_first_chunk,
-                )
-                if i == 0:
-                    videos = decoded
-                else:
-                    videos = torch.cat([videos, decoded], dim=2)
-
-            patch_size = getattr(self.vae.config, "patch_size", None)
-            if patch_size is not None:
-                from diffusers.models.autoencoders.autoencoder_kl_wan import (
-                    unpatchify,
-                )
-
-                videos = unpatchify(videos, patch_size=patch_size)
-
-            videos = torch.clamp(videos, min=-1.0, max=1.0)
-
-        session.decoder_cache = self.vae._feat_map
-        session.frame_cache_context.extend(videos.split(1, dim=2))
-
-        return self.video_processor.postprocess_video(videos, output_type="np")

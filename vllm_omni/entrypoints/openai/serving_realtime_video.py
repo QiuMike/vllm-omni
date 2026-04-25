@@ -79,22 +79,20 @@ class GenerateSession:
         return len(self.video_frame_queue) >= self.required_video_frames
 
     def sample_video_frames_bytes(self) -> list[bytes] | None:
-        """Sample and encode frames from the queue as JPEG bytes for RPC."""
-        pending = list(self.video_frame_queue)
-        self.video_frame_queue.clear()
-        required = self.required_video_frames
+        """Pop exactly the required number of frames from the queue.
 
-        if len(pending) < required:
+        Only consumes `required_video_frames` frames, leaving the rest
+        for subsequent blocks. This avoids discarding buffered frames
+        when the client sends ahead.
+        """
+        required = self.required_video_frames
+        if len(self.video_frame_queue) < required:
             return None
 
-        if len(pending) > required:
-            indices = np.round(
-                np.linspace(0, len(pending) - 1, required)
-            ).astype(int)
-            pending = [pending[i] for i in indices]
+        frames = [self.video_frame_queue.popleft() for _ in range(required)]
 
         result = []
-        for frame_bytes in pending:
+        for frame_bytes in frames:
             if isinstance(frame_bytes, bytes):
                 result.append(frame_bytes)
             elif Image is not None:
