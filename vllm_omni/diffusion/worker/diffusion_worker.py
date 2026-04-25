@@ -385,10 +385,9 @@ class DiffusionWorker:
                 generator=generator,
             )
 
-            if self.rank == 0:
-                self._launch_async_vae(
-                    session_id, rt_pipeline, session, block_idx, latents
-                )
+            self._launch_async_vae(
+                session_id, rt_pipeline, session, block_idx, latents
+            )
 
             return self._collect_encoded_frames(session_id)
 
