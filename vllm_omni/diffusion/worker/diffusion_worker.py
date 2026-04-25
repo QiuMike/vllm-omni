@@ -349,7 +349,10 @@ class DiffusionWorker:
             ]
 
         block_idx = session.block_idx
-        is_first_block = block_idx == 0
+        has_pending_pipeline = (
+            hasattr(self, "_pending_vae_decode")
+            and session_id in self._pending_vae_decode
+        )
 
         with (
             set_forward_context(
@@ -358,8 +361,7 @@ class DiffusionWorker:
             ),
             set_current_vllm_config(self.vllm_config),
         ):
-            if is_first_block:
-                # Synchronous first block for fast initial output
+            if not has_pending_pipeline:
                 video_np = rt_pipeline.generate_block(
                     session=session,
                     prompt=prompt,
