@@ -305,7 +305,9 @@ class DiffusionWorker:
             transformer_dtype=next(pipeline.transformer.parameters()).dtype,
         )
         session = RealtimeSession()
-        self._realtime_sessions[session_id] = (rt_pipeline, session)
+        seed = config.get("seed", 42)
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+        self._realtime_sessions[session_id] = (rt_pipeline, session, generator)
         logger.info("Worker %d: Created realtime session %s", self.rank, session_id)
         return True
 
@@ -331,7 +333,7 @@ class DiffusionWorker:
         if session_id not in self._realtime_sessions:
             raise RuntimeError(f"Realtime session {session_id} not found")
 
-        rt_pipeline, session = self._realtime_sessions[session_id]
+        rt_pipeline, session, generator = self._realtime_sessions[session_id]
 
         input_frames = None
         if video_frames_bytes:
@@ -355,6 +357,7 @@ class DiffusionWorker:
                 width=width,
                 num_inference_steps=num_inference_steps,
                 input_video_frames=input_frames,
+                generator=generator,
             )
 
         if self.rank == 0:
@@ -367,7 +370,7 @@ class DiffusionWorker:
             return True
         entry = self._realtime_sessions.pop(session_id, None)
         if entry is not None:
-            _, session = entry
+            _, session, _ = entry
             session.dispose()
             logger.info("Worker %d: Disposed realtime session %s", self.rank, session_id)
         return True
