@@ -325,10 +325,9 @@ class DiffusionWorker:
     ) -> list[bytes]:
         """Generate one video block with VAE-denoise overlap.
 
-        First block runs synchronously for fast initial output.
-        Subsequent blocks pipeline: denoise(N) on default stream overlaps
-        with VAE decode(N-1) on a separate CUDA stream.
-        Non-rank-0 workers skip VAE entirely (it's replicated, not sharded).
+        Block 0 runs synchronously for fast initial output.
+        Block 1 seeds the pipeline (denoise + async VAE, returns []).
+        Block 2+ pipelines: collect VAE(N-1) while denoise(N) runs.
         """
         if not hasattr(self, "_realtime_sessions"):
             raise RuntimeError(
@@ -351,10 +350,7 @@ class DiffusionWorker:
             ]
 
         block_idx = session.block_idx
-        has_pending_pipeline = (
-            hasattr(self, "_pending_vae_decode")
-            and session_id in self._pending_vae_decode
-        )
+        is_first_block = block_idx == 0
 
         with (
             set_forward_context(
@@ -363,7 +359,7 @@ class DiffusionWorker:
             ),
             set_current_vllm_config(self.vllm_config),
         ):
-            if not has_pending_pipeline:
+            if is_first_block:
                 video_np = rt_pipeline.generate_block(
                     session=session,
                     prompt=prompt,
