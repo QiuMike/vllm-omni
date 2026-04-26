@@ -171,6 +171,8 @@ class RealtimeVideoHandler:
                     "num_frames_per_block": config.get("num_frames_per_block", 3),
                     "kv_cache_num_frames": config.get("kv_cache_num_frames", 3),
                     "v2v_strength": config.get("v2v_strength"),
+                    "frame_format": config.get("frame_format", "jpeg"),
+                    "frame_quality": config.get("frame_quality", 95),
                 },
             )
             worker_session_created = True
