@@ -358,6 +358,8 @@ class DiffusionWorker:
         block_idx = session.block_idx
         is_first_block = block_idx == 0
 
+        profiler = self._get_profiler()
+
         with (
             set_forward_context(
                 vllm_config=self.vllm_config,
@@ -366,15 +368,19 @@ class DiffusionWorker:
             set_current_vllm_config(self.vllm_config),
         ):
             if is_first_block:
-                video_np = rt_pipeline.generate_block(
-                    session=session,
-                    prompt=prompt,
-                    height=height,
-                    width=width,
-                    num_inference_steps=num_inference_steps,
-                    input_video_frames=input_frames,
-                    generator=generator,
-                )
+                ctx = profiler.annotate_context_manager("rt_generate_block") if profiler else nullcontext()
+                with ctx:
+                    video_np = rt_pipeline.generate_block(
+                        session=session,
+                        prompt=prompt,
+                        height=height,
+                        width=width,
+                        num_inference_steps=num_inference_steps,
+                        input_video_frames=input_frames,
+                        generator=generator,
+                    )
+                if profiler:
+                    profiler.step()
                 if self.rank == 0:
                     cfg = self._get_session_encode_config(session_id)
                     return self._encode_all_frames(
@@ -384,15 +390,19 @@ class DiffusionWorker:
 
             self._sync_and_start_encode(session_id, rt_pipeline)
 
-            latents = rt_pipeline.denoise_block(
-                session=session,
-                prompt=prompt,
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                input_video_frames=input_frames,
-                generator=generator,
-            )
+            ctx = profiler.annotate_context_manager("rt_denoise_block") if profiler else nullcontext()
+            with ctx:
+                latents = rt_pipeline.denoise_block(
+                    session=session,
+                    prompt=prompt,
+                    height=height,
+                    width=width,
+                    num_inference_steps=num_inference_steps,
+                    input_video_frames=input_frames,
+                    generator=generator,
+                )
+            if profiler:
+                profiler.step()
 
             self._launch_async_vae(
                 session_id, rt_pipeline, session, block_idx, latents
@@ -486,8 +496,11 @@ class DiffusionWorker:
         # Ensure denoise results on default stream are visible to vae_stream
         vae_stream.wait_stream(torch.cuda.current_stream())
 
+        profiler = self._get_profiler()
         with torch.cuda.stream(vae_stream):
-            video_tensor = rt_pipeline.decode_block(session, block_idx, latents)
+            ctx = profiler.annotate_context_manager("rt_vae_decode") if profiler else nullcontext()
+            with ctx:
+                video_tensor = rt_pipeline.decode_block(session, block_idx, latents)
 
         self._pending_vae_decode[session_id] = {
             "stream": vae_stream,
@@ -507,14 +520,20 @@ class DiffusionWorker:
         pending = self._pending_vae_decode.pop(session_id, None)
         if pending is None:
             return frames
-        pending["stream"].synchronize()
-        if self.rank == 0:
-            rt_pipeline = entry[0]
-            video_np = rt_pipeline.postprocess_decoded(
-                pending["video_tensor"]
-            )
-            cfg = self._get_session_encode_config(session_id)
-            frames.extend(self._encode_all_frames(video_np, **cfg))
+
+        profiler = self._get_profiler()
+        ctx = profiler.annotate_context_manager("rt_vae_decode") if profiler else nullcontext()
+        with ctx:
+            pending["stream"].synchronize()
+            if self.rank == 0:
+                rt_pipeline = entry[0]
+                video_np = rt_pipeline.postprocess_decoded(
+                    pending["video_tensor"]
+                )
+                cfg = self._get_session_encode_config(session_id)
+                frames.extend(self._encode_all_frames(video_np, **cfg))
+        if profiler:
+            profiler.step()
         return frames
 
     def realtime_dispose_session(self, session_id: str) -> bool:
