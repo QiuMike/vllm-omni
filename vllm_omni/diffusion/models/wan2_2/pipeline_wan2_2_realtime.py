@@ -255,7 +255,7 @@ class Wan22RealtimePipeline:
         else:
             self.vae.clear_cache()
 
-        if not hasattr(self.vae, "_enc_conv_idx"):
+        if hasattr(self.vae, "_enc_conv_idx"):
             self.vae._enc_conv_idx = 0
         if hasattr(self.vae, "_enc_conv_num"):
             self.vae._enc_feat_map = [None] * self.vae._enc_conv_num
