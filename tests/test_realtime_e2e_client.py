@@ -241,6 +241,7 @@ async def run_t2v_batch(args):
         block_count = 0
         frame_count = 0
         start_time = time.time()
+        vae_temporal_compression = 4
 
         if args.save_dir:
             os.makedirs(args.save_dir, exist_ok=True)
@@ -265,10 +266,18 @@ async def run_t2v_batch(args):
                 block_count += 1
                 block_frames = [msg["content"]]
 
-                # Collect remaining frames of this block (sent rapidly)
+                # Calculate expected frames for this block:
+                # Block 0 (first): (num_frames_per_block - 1) * 4 + 1
+                # Block 1+: num_frames_per_block * 4
+                if block_count == 1:
+                    expected = (args.frames_per_block - 1) * vae_temporal_compression + 1
+                else:
+                    expected = args.frames_per_block * vae_temporal_compression
+
+                # Collect remaining frames of this block by expected count
                 try:
-                    while True:
-                        data = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    while len(block_frames) < expected:
+                        data = await asyncio.wait_for(ws.recv(), timeout=30.0)
                         msg2 = unpack_msg(data)
                         if msg2["type"] == "frame":
                             block_frames.append(msg2["content"])
