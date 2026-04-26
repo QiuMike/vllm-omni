@@ -45,6 +45,7 @@ class RealtimeSession:
     frame_cache_context: deque | None = None
     decoder_cache: Any = None
     v2v_strength: float | None = None
+    first_frame_latent: torch.Tensor | None = None
     block_idx: int = 0
 
     def is_prompt_changed(self, prompts: str | list[str]) -> bool:
@@ -78,6 +79,7 @@ class RealtimeSession:
         self.current_denoised_latents = None
         self.frame_cache_context = None
         self.decoder_cache = None
+        self.first_frame_latent = None
         self.last_embeds.clear()
         self.interpolated_embeds.clear()
         torch.cuda.empty_cache()
@@ -311,11 +313,12 @@ class Wan22RealtimePipeline:
 
         context = session.current_denoised_latents
         context = context[:, :, 1:][:, :, -self.kv_cache_num_frames + 1 :]
-        first_frame_latent = self._prepare_frame_latents(
-            frames=session.frame_cache_context[0],
-            dtype=self.vae_dtype,
-        )
-        first_frame_latent = first_frame_latent.to(context)
+        if session.first_frame_latent is None:
+            session.first_frame_latent = self._prepare_frame_latents(
+                frames=session.frame_cache_context[0],
+                dtype=self.vae_dtype,
+            )
+        first_frame_latent = session.first_frame_latent.to(context)
         return torch.cat((first_frame_latent, context), dim=2)
 
     def _setup_kv_cache(
