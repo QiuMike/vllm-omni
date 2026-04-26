@@ -310,6 +310,12 @@ class DiffusionWorker:
         seed = config.get("seed", 42)
         generator = torch.Generator(device=self.device).manual_seed(seed)
         self._realtime_sessions[session_id] = (rt_pipeline, session, generator)
+        if not hasattr(self, "_realtime_session_config"):
+            self._realtime_session_config: dict[str, dict] = {}
+        self._realtime_session_config[session_id] = {
+            "frame_format": config.get("frame_format", "jpeg"),
+            "frame_quality": config.get("frame_quality", 95),
+        }
         logger.info("Worker %d: Created realtime session %s", self.rank, session_id)
         return True
 
@@ -370,7 +376,10 @@ class DiffusionWorker:
                     generator=generator,
                 )
                 if self.rank == 0:
-                    return self._encode_all_frames_png(video_np)
+                    cfg = self._get_session_encode_config(session_id)
+                    return self._encode_all_frames(
+                        video_np, **cfg
+                    )
                 return []
 
             self._sync_and_start_encode(session_id, rt_pipeline)
@@ -391,6 +400,15 @@ class DiffusionWorker:
 
             return self._collect_encoded_frames(session_id)
 
+    def _get_session_encode_config(self, session_id: str) -> dict:
+        if hasattr(self, "_realtime_session_config"):
+            cfg = self._realtime_session_config.get(session_id, {})
+            return {
+                "fmt": cfg.get("frame_format", "jpeg"),
+                "quality": cfg.get("frame_quality", 95),
+            }
+        return {}
+
     def _sync_and_start_encode(
         self, session_id: str, rt_pipeline
     ) -> None:
@@ -398,7 +416,7 @@ class DiffusionWorker:
 
         Must be called before denoise_block so that session state written
         by decode_block on the VAE stream is visible. The heavy CPU work
-        (postprocess + PNG encode) runs in a thread that overlaps with
+        (postprocess + image encode) runs in a thread that overlaps with
         the subsequent GPU denoise.
         """
         if not hasattr(self, "_pending_vae_decode"):
@@ -424,11 +442,12 @@ class DiffusionWorker:
                     self._postprocess_and_encode,
                     rt_pipeline,
                     video_tensor_cpu,
+                    self._get_session_encode_config(session_id),
                 )
             )
 
     def _collect_encoded_frames(self, session_id: str) -> list[bytes]:
-        """Collect PNG bytes from the background encode thread."""
+        """Collect encoded bytes from the background encode thread."""
         if not hasattr(self, "_pending_png_future"):
             return []
         future = self._pending_png_future.pop(session_id, None)
@@ -437,9 +456,13 @@ class DiffusionWorker:
         return future.result()
 
     @staticmethod
-    def _postprocess_and_encode(rt_pipeline, video_tensor_cpu) -> list[bytes]:
+    def _postprocess_and_encode(
+        rt_pipeline, video_tensor_cpu, encode_cfg: dict | None = None
+    ) -> list[bytes]:
         video_np = rt_pipeline.postprocess_decoded(video_tensor_cpu)
-        return DiffusionWorker._encode_all_frames_png(video_np)
+        return DiffusionWorker._encode_all_frames(
+            video_np, **(encode_cfg or {})
+        )
 
     def _launch_async_vae(
         self,
@@ -490,7 +513,8 @@ class DiffusionWorker:
             video_np = rt_pipeline.postprocess_decoded(
                 pending["video_tensor"]
             )
-            frames.extend(self._encode_all_frames_png(video_np))
+            cfg = self._get_session_encode_config(session_id)
+            frames.extend(self._encode_all_frames(video_np, **cfg))
         return frames
 
     def realtime_dispose_session(self, session_id: str) -> bool:
@@ -501,6 +525,8 @@ class DiffusionWorker:
         self.realtime_flush_decode(session_id)
         if hasattr(self, "_vae_streams"):
             self._vae_streams.pop(session_id, None)
+        if hasattr(self, "_realtime_session_config"):
+            self._realtime_session_config.pop(session_id, None)
         entry = self._realtime_sessions.pop(session_id, None)
         if entry is not None:
             _, session, _ = entry
@@ -513,8 +539,10 @@ class DiffusionWorker:
         return True
 
     @staticmethod
-    def _encode_all_frames_png(video_np) -> list[bytes]:
-        """Encode all video frames to a list of PNG bytes."""
+    def _encode_all_frames(
+        video_np, fmt: str = "jpeg", quality: int = 95
+    ) -> list[bytes]:
+        """Encode all video frames to a list of image bytes."""
         import io as _io
 
         import numpy as np
@@ -525,13 +553,20 @@ class DiffusionWorker:
         if video_np.ndim == 3:
             video_np = video_np[np.newaxis]
 
+        fmt_upper = fmt.upper()
+        if fmt_upper == "JPG":
+            fmt_upper = "JPEG"
+        save_kwargs: dict = {"format": fmt_upper}
+        if fmt_upper == "JPEG":
+            save_kwargs["quality"] = quality
+
         result = []
         for frame in video_np:
             if frame.dtype in (np.float32, np.float64):
                 frame = (frame * 255).clip(0, 255).astype(np.uint8)
             img = Image.fromarray(frame)
             buf = _io.BytesIO()
-            img.save(buf, format="PNG")
+            img.save(buf, **save_kwargs)
             result.append(buf.getvalue())
         return result
 

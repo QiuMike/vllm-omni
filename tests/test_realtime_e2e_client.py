@@ -83,10 +83,13 @@ async def run_t2v_interactive(args):
             "width": args.width,
             "num_inference_steps": args.steps,
             "num_frames_per_block": args.frames_per_block,
+            "frame_format": args.frame_format,
+            "frame_quality": args.frame_quality,
         }
         await ws.send(pack_msg(config))
         print(f"Config: prompt='{args.prompt}', "
-              f"{args.width}x{args.height}, steps={args.steps}")
+              f"{args.width}x{args.height}, steps={args.steps}, "
+              f"format={args.frame_format}")
 
         data = await ws.recv()
         msg = unpack_msg(data)
@@ -221,10 +224,13 @@ async def run_t2v_batch(args):
             "width": args.width,
             "num_inference_steps": args.steps,
             "num_frames_per_block": args.frames_per_block,
+            "frame_format": args.frame_format,
+            "frame_quality": args.frame_quality,
         }
         await ws.send(pack_msg(config))
         print(f"Sent config: mode=t2v, prompt='{args.prompt}', "
-              f"{args.width}x{args.height}, steps={args.steps}")
+              f"{args.width}x{args.height}, steps={args.steps}, "
+              f"format={args.frame_format}")
 
         data = await ws.recv()
         msg = unpack_msg(data)
@@ -394,11 +400,14 @@ async def run_v2v_test(args):
             "width": args.width,
             "num_inference_steps": args.steps,
             "num_frames_per_block": args.frames_per_block,
+            "frame_format": args.frame_format,
+            "frame_quality": args.frame_quality,
         }
         if args.strength is not None:
             config["v2v_strength"] = args.strength
         await ws.send(pack_msg(config))
-        print(f"Sent config: mode=v2v, prompt='{args.prompt}'"
+        print(f"Sent config: mode=v2v, prompt='{args.prompt}', "
+              f"format={args.frame_format}"
               f"{f', strength={args.strength}' if args.strength else ''}")
 
         data = await ws.recv()
@@ -551,6 +560,11 @@ def main():
                         help="num_frames_per_block (latent frames per block)")
     parser.add_argument("--strength", type=float, default=None,
                         help="[v2v] V2V strength (0.0-1.0, lower preserves more)")
+    parser.add_argument("--frame-format", choices=["jpeg", "png"],
+                        default="jpeg",
+                        help="Output frame encoding format (default: jpeg)")
+    parser.add_argument("--frame-quality", type=int, default=95,
+                        help="JPEG quality 1-100 (default: 95, ignored for PNG)")
 
     args = parser.parse_args()
 
