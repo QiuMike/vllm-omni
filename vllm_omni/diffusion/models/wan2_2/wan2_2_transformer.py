@@ -11,7 +11,6 @@ import torch.nn.functional as F
 from diffusers.models.attention import FeedForward
 from diffusers.models.embeddings import PixArtAlphaTextProjection, TimestepEmbedding, Timesteps
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.models.normalization import FP32LayerNorm
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -30,38 +29,11 @@ from vllm_omni.diffusion.distributed.sp_plan import (
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
 from vllm_omni.diffusion.layers.adalayernorm import AdaLayerNorm
+from vllm_omni.diffusion.layers.norm import LayerNorm, RMSNorm
+from vllm_omni.diffusion.layers.rope import RotaryEmbeddingWan
 from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
-
-
-def apply_rotary_emb_wan(
-    hidden_states: torch.Tensor,
-    freqs_cos: torch.Tensor,
-    freqs_sin: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensors.
-
-    Args:
-        hidden_states: Input tensor of shape [B, S, H, D]
-        freqs_cos: Cosine frequencies
-        freqs_sin: Sine frequencies
-
-    Returns:
-        Tensor with rotary embeddings applied
-    """
-    x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
-    cos = freqs_cos[..., 0::2]
-    sin = freqs_sin[..., 1::2]
-    rotated = torch.stack(
-        (
-            x1 * cos - x2 * sin,
-            x1 * sin + x2 * cos,
-        ),
-        dim=-1,
-    )
-    return rotated.flatten(-2, -1).to(hidden_states.dtype)
 
 
 class DistributedRMSNorm(nn.Module):
@@ -236,9 +208,9 @@ class WanImageEmbedding(nn.Module):
     def __init__(self, in_features: int, out_features: int, pos_embed_seq_len: int | None = None):
         super().__init__()
 
-        self.norm1 = FP32LayerNorm(in_features)
+        self.norm1 = LayerNorm(in_features)
         self.ff = FeedForward(in_features, out_features, mult=1, activation_fn="gelu")
-        self.norm2 = FP32LayerNorm(out_features)
+        self.norm2 = LayerNorm(out_features)
         if pos_embed_seq_len is not None:
             self.pos_embed = nn.Parameter(torch.zeros(1, pos_embed_seq_len, in_features))
         else:
@@ -378,8 +350,12 @@ class WanSelfAttention(nn.Module):
         self.tp_inner_dim = self.num_heads * head_dim
 
         # QK normalization using vLLM's RMSNorm
-        self.norm_q = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
-        self.norm_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+        if get_tensor_model_parallel_world_size() > 1:
+            self.norm_q = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+            self.norm_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+        else:
+            self.norm_q = RMSNorm(self.tp_inner_dim, eps=eps)
+            self.norm_k = RMSNorm(self.tp_inner_dim, eps=eps)
 
         self.to_out = RowParallelLinear(
             self.inner_dim,
@@ -423,9 +399,10 @@ class WanSelfAttention(nn.Module):
 
         # Apply rotary embeddings
         if rotary_emb is not None:
+            self.rotary_embedding = RotaryEmbeddingWan(is_neox_style=False, half_head_dim=True)
             freqs_cos, freqs_sin = rotary_emb
-            query = apply_rotary_emb_wan(query, freqs_cos, freqs_sin)
-            key = apply_rotary_emb_wan(key, freqs_cos, freqs_sin)
+            query = self.rotary_embedding(query, freqs_cos, freqs_sin)
+            key = self.rotary_embedding(key, freqs_cos, freqs_sin)
 
         # Create attention metadata if mask is provided
         attn_metadata = None
@@ -498,8 +475,12 @@ class WanCrossAttention(nn.Module):
         self.tp_inner_dim = self.num_heads * head_dim
 
         # QK normalization
-        self.norm_q = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
-        self.norm_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+        if get_tensor_model_parallel_world_size() > 1:
+            self.norm_q = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+            self.norm_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+        else:
+            self.norm_q = RMSNorm(self.tp_inner_dim, eps=eps)
+            self.norm_k = RMSNorm(self.tp_inner_dim, eps=eps)
 
         # Optional added KV projections for I2V (image embeddings)
         self.added_kv_proj_dim = added_kv_proj_dim
@@ -518,7 +499,10 @@ class WanCrossAttention(nn.Module):
                 gather_output=False,
                 return_bias=False,
             )
-            self.norm_added_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+            if get_tensor_model_parallel_world_size() > 1:
+                self.norm_added_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+            else:
+                self.norm_added_k = RMSNorm(self.tp_inner_dim, eps=eps)
         else:
             self.add_k_proj = None
             self.add_v_proj = None
@@ -637,7 +621,7 @@ class WanTransformerBlock(nn.Module):
             eps=eps,
             added_kv_proj_dim=added_kv_proj_dim,
         )
-        self.norm2 = FP32LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
+        self.norm2 = LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
 
         # 3. Feed-forward
         self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim)
@@ -860,6 +844,10 @@ class WanTransformer3DModel(nn.Module):
         self.timestep_proj_prepare = TimestepProjPrepare()
         self.output_scale_shift_prepare = OutputScaleShiftPrepare(inner_dim)
 
+        # ROPE helper
+        self._cached_rope_emb = None
+        self._cached_rope_resolution = None
+
     @property
     def dtype(self) -> torch.dtype:
         """Return the dtype of the model parameters."""
@@ -881,7 +869,14 @@ class WanTransformer3DModel(nn.Module):
         post_patch_width = width // p_w
 
         # Compute RoPE embeddings (sharded by _sp_plan via split_output=True)
-        rotary_emb = self.rope(hidden_states)
+        current_rope_resolution = (post_patch_num_frames, post_patch_height, post_patch_width)
+        if self._cached_rope_resolution == current_rope_resolution and self._cached_rope_emb is not None:
+            rotary_emb = self._cached_rope_emb
+        else:
+            freqs_cos, freqs_sin = self.rope(hidden_states)
+            rotary_emb = (freqs_cos[..., 0::2].to(hidden_states.dtype), freqs_sin[..., 1::2].to(hidden_states.dtype))
+            self._hidden_states_shape = hidden_states.shape
+            self._cached_rope_emb = rotary_emb
 
         # Patch embedding and flatten to sequence
         # (hidden_states is sharded at blocks.0 input by _sp_plan)
