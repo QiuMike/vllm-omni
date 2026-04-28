@@ -301,6 +301,16 @@ class DiffusionWorker:
 
     # ==================== Realtime Video ====================
 
+    def realtime_is_supported(self) -> bool:
+        """Check if the loaded pipeline supports realtime video generation."""
+        pipeline = self.model_runner.pipeline
+        if pipeline is None or not hasattr(pipeline, "transformer"):
+            return False
+        from vllm_omni.diffusion.models.wan2_2.causal_wan2_2_transformer import (
+            CausalWanTransformer3DModel,
+        )
+        return isinstance(pipeline.transformer, CausalWanTransformer3DModel)
+
     def realtime_create_session(self, session_id: str, config: dict) -> bool:
         """Create a realtime video pipeline + session on this worker."""
         if not hasattr(self, "_realtime_sessions"):

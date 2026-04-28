@@ -612,11 +612,24 @@ async def omni_init_app_state(
         state.openai_streaming_speech = None
         state.openai_streaming_video = None
 
-        from vllm_omni.entrypoints.openai.serving_realtime_video import (
-            RealtimeVideoHandler,
-        )
+        # Register realtime video handler only if the model supports it
+        try:
+            is_supported = await engine_client.collective_rpc(
+                method="realtime_is_supported"
+            )
+            # Unwrap nested list layers from collective_rpc
+            while isinstance(is_supported, list) and len(is_supported) == 1:
+                is_supported = is_supported[0]
+        except Exception:
+            is_supported = False
 
-        state.realtime_video_handler = RealtimeVideoHandler(engine_client)
+        if is_supported:
+            from vllm_omni.entrypoints.openai.serving_realtime_video import (
+                RealtimeVideoHandler,
+            )
+            state.realtime_video_handler = RealtimeVideoHandler(engine_client)
+        else:
+            state.realtime_video_handler = None
 
         state.enable_server_load_tracking = getattr(args, "enable_server_load_tracking", False)
         state.server_load_metrics = 0

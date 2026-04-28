@@ -64,7 +64,7 @@ class GenerateSession:
         self.num_inference_steps: int | None = None
         self.num_frames_per_block: int = 3
         self.action_queue: deque = deque(maxlen=1)
-        self.video_frame_queue: deque = deque(maxlen=256)
+        self.video_frame_queue: deque = deque()
         self.generate_chunk_cnt: int = 0
 
     @property
