@@ -94,9 +94,7 @@ class SelfAttentionKVCache:
         self._ensure_allocated()
         seq_len = key.shape[1]
         if seq_len > self.max_size:
-            raise ValueError(
-                f"bulk_write seq_len ({seq_len}) exceeds buffer capacity ({self.max_size})"
-            )
+            raise ValueError(f"bulk_write seq_len ({seq_len}) exceeds buffer capacity ({self.max_size})")
         self.k[:, :seq_len] = key
         self.v[:, :seq_len] = value
         self._global_end = seq_len
@@ -116,13 +114,9 @@ class SelfAttentionKVCache:
         sink_tokens = self._sink_size * self._frame_seq_length
 
         if num_new > buf_size:
-            raise ValueError(
-                f"append num_new ({num_new}) exceeds buffer capacity ({buf_size})"
-            )
+            raise ValueError(f"append num_new ({num_new}) exceeds buffer capacity ({buf_size})")
 
-        needs_eviction = (
-            current_end > self._global_end and num_new + self._local_end > buf_size
-        )
+        needs_eviction = current_end > self._global_end and num_new + self._local_end > buf_size
 
         if needs_eviction:
             num_evicted = num_new + self._local_end - buf_size
@@ -233,9 +227,7 @@ class KVCacheManager:
                 )
                 if val is None
             ]
-            raise ValueError(
-                f"Self-attention cache requires all parameters; missing: {missing}"
-            )
+            raise ValueError(f"Self-attention cache requires all parameters; missing: {missing}")
 
         if sa_all_set:
             self.self_attn_caches: list[SelfAttentionKVCache] | None = [

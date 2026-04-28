@@ -27,7 +27,6 @@ from collections import deque
 from typing import Any
 from uuid import uuid4
 
-import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
 try:
@@ -132,9 +131,7 @@ class RealtimeVideoHandler:
           orchestrator [[result]] → AsyncOmni [[result]]
         We unwrap until we reach a non-list scalar.
         """
-        results = await self._engine.collective_rpc(
-            method=method, args=args
-        )
+        results = await self._engine.collective_rpc(method=method, args=args)
         # Unwrap nested list layers: [[value]] → [value] → value
         while isinstance(results, list) and len(results) == 1:
             results = results[0]
@@ -159,9 +156,7 @@ class RealtimeVideoHandler:
             session.num_frames_per_block = config.get("num_frames_per_block", 3)
 
             if session.mode == "t2v" and config.get("first_frame"):
-                await self._send_error(
-                    websocket, "first_frame not allowed in T2V mode"
-                )
+                await self._send_error(websocket, "first_frame not allowed in T2V mode")
                 return
 
             await self._rpc(
@@ -179,16 +174,10 @@ class RealtimeVideoHandler:
 
             await self._send_status(websocket, "session_started")
 
-            gen_task = asyncio.create_task(
-                self._generate_loop(websocket, session)
-            )
-            listen_task = asyncio.create_task(
-                self._listen_actions(websocket, session)
-            )
+            gen_task = asyncio.create_task(self._generate_loop(websocket, session))
+            listen_task = asyncio.create_task(self._listen_actions(websocket, session))
 
-            done, pending = await asyncio.wait(
-                {gen_task, listen_task}, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, pending = await asyncio.wait({gen_task, listen_task}, return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
                 task.cancel()
             for task in done:
@@ -221,9 +210,7 @@ class RealtimeVideoHandler:
     async def _receive_config(self, websocket: WebSocket) -> dict | None:
         """Wait for initial config message."""
         try:
-            data = await asyncio.wait_for(
-                websocket.receive_bytes(), timeout=_CONFIG_TIMEOUT
-            )
+            data = await asyncio.wait_for(websocket.receive_bytes(), timeout=_CONFIG_TIMEOUT)
             if unpackb is not None:
                 msg = unpackb(data, raw=False)
             else:
@@ -331,22 +318,16 @@ class RealtimeVideoHandler:
                         session.video_frame_queue.extend(frames_data)
 
             except Exception as e:
-                logger.warning(
-                    "Session %s action parse error: %s", session.id, e
-                )
+                logger.warning("Session %s action parse error: %s", session.id, e)
 
-    async def _send_frame(
-        self, websocket: WebSocket, content: bytes
-    ) -> None:
+    async def _send_frame(self, websocket: WebSocket, content: bytes) -> None:
         msg = {"type": "frame", "content": content}
         if packb is not None:
             await websocket.send_bytes(packb(msg, use_bin_type=True))
         else:
             await websocket.send_bytes(content)
 
-    async def _send_status(
-        self, websocket: WebSocket, status: str
-    ) -> None:
+    async def _send_status(self, websocket: WebSocket, status: str) -> None:
         msg = {"type": "status", "content": status}
         if packb is not None:
             await websocket.send_bytes(packb(msg, use_bin_type=True))
@@ -355,9 +336,7 @@ class RealtimeVideoHandler:
 
             await websocket.send_text(json.dumps(msg))
 
-    async def _send_error(
-        self, websocket: WebSocket, error: str
-    ) -> None:
+    async def _send_error(self, websocket: WebSocket, error: str) -> None:
         msg = {"type": "error", "content": error}
         try:
             if packb is not None:

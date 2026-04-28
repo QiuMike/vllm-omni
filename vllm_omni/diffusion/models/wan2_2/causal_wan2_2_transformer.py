@@ -24,13 +24,11 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.models.wan2_2.kv_cache import (
     CrossAttentionKVCache,
@@ -45,15 +43,12 @@ from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import (
     WanTimeTextImageEmbedding,
     apply_rotary_emb_wan,
 )
-from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
 
 # Compile flex_attention with max-autotune for Wan 1.3B compatibility
 # See https://github.com/pytorch/pytorch/issues/133254
-_compiled_flex_attention = torch.compile(
-    flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs"
-)
+_compiled_flex_attention = torch.compile(flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
 
 
 class CausalWanSelfAttention(nn.Module):
@@ -81,9 +76,7 @@ class CausalWanSelfAttention(nn.Module):
         self.head_dim = head_dim
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
-        self.max_attention_size = (
-            32760 if local_attn_size == -1 else local_attn_size * 1560
-        )
+        self.max_attention_size = 32760 if local_attn_size == -1 else local_attn_size * 1560
 
         # Fused QKV projection with TP
         self.to_qkv = QKVParallelLinear(
@@ -152,13 +145,9 @@ class CausalWanSelfAttention(nn.Module):
         key = apply_rotary_emb_wan(key, freqs_cos, freqs_sin)
 
         if isinstance(kv_cache, SelfAttentionKVCache):
-            out = self._forward_sa_kv_cache(
-                query, key, value, kv_cache, current_start
-            )
+            out = self._forward_sa_kv_cache(query, key, value, kv_cache, current_start)
         elif kv_cache is not None:
-            out = self._forward_kv_cache(
-                query, key, value, kv_cache, current_start, cache_start
-            )
+            out = self._forward_kv_cache(query, key, value, kv_cache, current_start, cache_start)
         elif block_mask is not None:
             out = self._forward_flex_attention(query, key, value, block_mask)
         else:
@@ -235,12 +224,8 @@ class CausalWanSelfAttention(nn.Module):
             and (num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size)
         ):
             # Evict old tokens, preserving sink tokens
-            num_evicted_tokens = (
-                num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
-            )
-            num_rolled_tokens = (
-                kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
-            )
+            num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
+            num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
             src_start = sink_tokens + num_evicted_tokens
             src_end = src_start + num_rolled_tokens
             dst_start = sink_tokens
@@ -259,11 +244,7 @@ class CausalWanSelfAttention(nn.Module):
             kv_cache["v"][:, local_start_index:local_end_index] = value
         else:
             # Direct assignment without eviction
-            local_end_index = (
-                kv_cache["local_end_index"].item()
-                + current_end
-                - kv_cache["global_end_index"].item()
-            )
+            local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
             local_start_index = local_end_index - num_new_tokens
             kv_cache["k"] = kv_cache["k"].detach()
             kv_cache["v"] = kv_cache["v"].detach()
@@ -378,9 +359,7 @@ class CausalWanTransformerBlock(nn.Module):
         else:
             attn_output = self.attn2(norm_hidden_states, encoder_hidden_states)
             if crossattn_cache is not None:
-                crossattn_cache.update(
-                    encoder_hidden_states, encoder_hidden_states
-                )
+                crossattn_cache.update(encoder_hidden_states, encoder_hidden_states)
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
@@ -517,9 +496,7 @@ class CausalWanTransformer3DModel(nn.Module):
         # 4. Output norm & projection
         self.norm_out = AdaLayerNorm(inner_dim, elementwise_affine=False, eps=eps)
         self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
-        self.scale_shift_table = nn.Parameter(
-            torch.randn(1, 2, inner_dim) / inner_dim**0.5
-        )
+        self.scale_shift_table = nn.Parameter(torch.randn(1, 2, inner_dim) / inner_dim**0.5)
 
         # Causal state
         self.block_mask: BlockMask | None = None
@@ -546,9 +523,7 @@ class CausalWanTransformer3DModel(nn.Module):
         total_length = num_frames * frame_seqlen
         padded_length = math.ceil(total_length / 128) * 128 - total_length
 
-        ends = torch.zeros(
-            total_length + padded_length, device=device, dtype=torch.long
-        )
+        ends = torch.zeros(total_length + padded_length, device=device, dtype=torch.long)
 
         frame_indices = torch.arange(
             start=0,
@@ -557,18 +532,15 @@ class CausalWanTransformer3DModel(nn.Module):
             device=device,
         )
         for tmp in frame_indices:
-            ends[tmp : tmp + frame_seqlen * num_frame_per_block] = (
-                tmp + frame_seqlen * num_frame_per_block
-            )
+            ends[tmp : tmp + frame_seqlen * num_frame_per_block] = tmp + frame_seqlen * num_frame_per_block
 
         def attention_mask(b, h, q_idx, kv_idx):
             if local_attn_size == -1:
                 return (kv_idx < ends[q_idx]) | (q_idx == kv_idx)
             else:
-                return (
-                    (kv_idx < ends[q_idx])
-                    & (kv_idx >= (ends[q_idx] - local_attn_size * frame_seqlen))
-                ) | (q_idx == kv_idx)
+                return ((kv_idx < ends[q_idx]) & (kv_idx >= (ends[q_idx] - local_attn_size * frame_seqlen))) | (
+                    q_idx == kv_idx
+                )
 
         block_mask = create_block_mask(
             attention_mask,
@@ -659,11 +631,11 @@ class CausalWanTransformer3DModel(nn.Module):
         else:
             ts_seq_len = None
 
-        temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = (
-            self.condition_embedder(
-                timestep, encoder_hidden_states, encoder_hidden_states_image,
-                timestep_seq_len=ts_seq_len,
-            )
+        temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
+            timestep,
+            encoder_hidden_states,
+            encoder_hidden_states_image,
+            timestep_seq_len=ts_seq_len,
         )
 
         if ts_seq_len is not None:
@@ -672,9 +644,7 @@ class CausalWanTransformer3DModel(nn.Module):
             timestep_proj = timestep_proj.unflatten(1, (6, -1))
 
         if encoder_hidden_states_image is not None:
-            encoder_hidden_states = torch.concat(
-                [encoder_hidden_states_image, encoder_hidden_states], dim=1
-            )
+            encoder_hidden_states = torch.concat([encoder_hidden_states_image, encoder_hidden_states], dim=1)
 
         return (
             hidden_states,
@@ -701,9 +671,6 @@ class CausalWanTransformer3DModel(nn.Module):
             return self.rope(hidden_states)
 
         head_dim = self.attention_head_dim
-        h_dim = w_dim = 2 * (head_dim // 6)
-        t_dim = head_dim - h_dim - w_dim
-
         split_sizes = [
             head_dim - 2 * (head_dim // 3),
             head_dim // 3,
@@ -737,12 +704,21 @@ class CausalWanTransformer3DModel(nn.Module):
         start_frame: int = 0,
     ) -> torch.Tensor | Transformer2DModelOutput:
         (
-            hidden_states, encoder_hidden_states, temb, timestep_proj,
-            rotary_emb, batch_size,
-            post_patch_num_frames, post_patch_height, post_patch_width,
+            hidden_states,
+            encoder_hidden_states,
+            temb,
+            timestep_proj,
+            rotary_emb,
+            batch_size,
+            post_patch_num_frames,
+            post_patch_height,
+            post_patch_width,
         ) = self._forward_common_prepare(
-            hidden_states, timestep, encoder_hidden_states,
-            encoder_hidden_states_image, start_frame,
+            hidden_states,
+            timestep,
+            encoder_hidden_states,
+            encoder_hidden_states_image,
+            start_frame,
         )
         p_t, p_h, p_w = self.config.patch_size
 
@@ -769,8 +745,13 @@ class CausalWanTransformer3DModel(nn.Module):
 
         # Output
         return self._forward_output(
-            hidden_states, temb, batch_size,
-            post_patch_num_frames, post_patch_height, post_patch_width, return_dict,
+            hidden_states,
+            temb,
+            batch_size,
+            post_patch_num_frames,
+            post_patch_height,
+            post_patch_width,
+            return_dict,
         )
 
     def _forward_inference(
@@ -788,12 +769,21 @@ class CausalWanTransformer3DModel(nn.Module):
         start_frame: int = 0,
     ) -> torch.Tensor | Transformer2DModelOutput:
         (
-            hidden_states, encoder_hidden_states, temb, timestep_proj,
-            rotary_emb, batch_size,
-            post_patch_num_frames, post_patch_height, post_patch_width,
+            hidden_states,
+            encoder_hidden_states,
+            temb,
+            timestep_proj,
+            rotary_emb,
+            batch_size,
+            post_patch_num_frames,
+            post_patch_height,
+            post_patch_width,
         ) = self._forward_common_prepare(
-            hidden_states, timestep, encoder_hidden_states,
-            encoder_hidden_states_image, start_frame,
+            hidden_states,
+            timestep,
+            encoder_hidden_states,
+            encoder_hidden_states_image,
+            start_frame,
         )
         p_t, p_h, p_w = self.config.patch_size
 
@@ -815,8 +805,13 @@ class CausalWanTransformer3DModel(nn.Module):
 
         # Output
         return self._forward_output(
-            hidden_states, temb, batch_size,
-            post_patch_num_frames, post_patch_height, post_patch_width, return_dict,
+            hidden_states,
+            temb,
+            batch_size,
+            post_patch_num_frames,
+            post_patch_height,
+            post_patch_width,
+            return_dict,
         )
 
     def _forward_output(
@@ -832,22 +827,25 @@ class CausalWanTransformer3DModel(nn.Module):
         p_t, p_h, p_w = self.config.patch_size
 
         if temb.ndim == 3:
-            shift, scale = (
-                self.scale_shift_table.unsqueeze(0).to(hidden_states.device)
-                + temb.unsqueeze(2)
-            ).chunk(2, dim=2)
+            shift, scale = (self.scale_shift_table.unsqueeze(0).to(hidden_states.device) + temb.unsqueeze(2)).chunk(
+                2, dim=2
+            )
             shift = shift.squeeze(2)
             scale = scale.squeeze(2)
         else:
-            shift, scale = (
-                self.scale_shift_table.to(hidden_states.device) + temb.unsqueeze(1)
-            ).chunk(2, dim=1)
+            shift, scale = (self.scale_shift_table.to(hidden_states.device) + temb.unsqueeze(1)).chunk(2, dim=1)
         hidden_states = self.norm_out(hidden_states, scale, shift).type_as(hidden_states)
         hidden_states = self.proj_out(hidden_states)
 
         hidden_states = hidden_states.reshape(
-            batch_size, post_patch_num_frames, post_patch_height, post_patch_width,
-            p_t, p_h, p_w, -1,
+            batch_size,
+            post_patch_num_frames,
+            post_patch_height,
+            post_patch_width,
+            p_t,
+            p_h,
+            p_w,
+            -1,
         )
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
         output = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)

@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -182,18 +181,11 @@ class Wan22RealtimePipeline:
         ids, mask = text_inputs.input_ids, text_inputs.attention_mask
         seq_lens = mask.gt(0).sum(dim=1).long()
 
-        prompt_embeds = self.text_encoder(
-            ids.to(device), mask.to(device)
-        ).last_hidden_state
+        prompt_embeds = self.text_encoder(ids.to(device), mask.to(device)).last_hidden_state
         prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
         prompt_embeds = [u[:v] for u, v in zip(prompt_embeds, seq_lens)]
         prompt_embeds = torch.stack(
-            [
-                torch.cat(
-                    [u, u.new_zeros(max_sequence_length - u.size(0), u.size(1))]
-                )
-                for u in prompt_embeds
-            ],
+            [torch.cat([u, u.new_zeros(max_sequence_length - u.size(0), u.size(1))]) for u in prompt_embeds],
             dim=0,
         )
         return prompt_embeds
@@ -212,11 +204,7 @@ class Wan22RealtimePipeline:
         steps = self.INTERPOLATION_STEPS
         assert len(prev_embeds) == len(curr_embeds)
 
-        weights = (
-            torch.linspace(1.0 / steps, 1.0, steps=steps)
-            .unsqueeze(1)
-            .unsqueeze(2)
-        )
+        weights = torch.linspace(1.0 / steps, 1.0, steps=steps).unsqueeze(1).unsqueeze(2)
 
         per_layer_chunks: list[list[torch.Tensor]] = []
         for prev, curr in zip(prev_embeds, curr_embeds):
@@ -240,12 +228,8 @@ class Wan22RealtimePipeline:
         sigmas = torch.linspace(1.0, 0.0, 1001, device=device)[:-1]
         sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
         all_timesteps = sigmas * 1000.0
-        zero_padded = torch.cat(
-            [all_timesteps, torch.tensor([0], device=device, dtype=all_timesteps.dtype)]
-        )
-        denoising_steps = torch.linspace(
-            strength * 1000, 0, num_inference_steps, dtype=torch.float32
-        ).to(torch.long)
+        zero_padded = torch.cat([all_timesteps, torch.tensor([0], device=device, dtype=all_timesteps.dtype)])
+        denoising_steps = torch.linspace(strength * 1000, 0, num_inference_steps, dtype=torch.float32).to(torch.long)
         timesteps = zero_padded[1000 - denoising_steps]
         return timesteps, all_timesteps, sigmas
 
@@ -273,12 +257,7 @@ class Wan22RealtimePipeline:
         self._reset_vae_encode_cache()
         init_latents = [
             retrieve_latents(
-                self.vae.encode(
-                    vid.unsqueeze(0)
-                    .transpose(2, 1)
-                    .to(device=self.vae.device, dtype=dtype)
-                    .contiguous()
-                ),
+                self.vae.encode(vid.unsqueeze(0).transpose(2, 1).to(device=self.vae.device, dtype=dtype).contiguous()),
                 sample_mode="argmax",
             )
             for vid in video
@@ -307,9 +286,7 @@ class Wan22RealtimePipeline:
         total_frames_generated = (session.block_idx - 1) * self.num_frames_per_block
 
         if total_frames_generated < self.kv_cache_num_frames:
-            return session.current_denoised_latents[
-                :, :, : self.kv_cache_num_frames
-            ]
+            return session.current_denoised_latents[:, :, : self.kv_cache_num_frames]
 
         context = session.current_denoised_latents
         context = context[:, :, 1:][:, :, -self.kv_cache_num_frames + 1 :]
@@ -332,10 +309,7 @@ class Wan22RealtimePipeline:
         num_heads = self.transformer.num_attention_heads // tp_size
         head_dim = self.transformer.attention_head_dim
         num_blocks = len(self.transformer.blocks)
-        sa_max_size = (
-            (self.kv_cache_num_frames + self.num_frames_per_block)
-            * self.frame_seq_length
-        )
+        sa_max_size = (self.kv_cache_num_frames + self.num_frames_per_block) * self.frame_seq_length
 
         if session.kv_cache_manager is None:
             sink_size = self.transformer.blocks[0].attn1.sink_size
@@ -396,9 +370,7 @@ class Wan22RealtimePipeline:
         sigma_t: torch.Tensor,
     ) -> torch.Tensor:
         sigma = sigma_t.to(device=sample.device).reshape(1, 1, 1, 1)
-        return (
-            (1 - sigma.double()) * sample.double() + sigma.double() * noise.double()
-        ).type_as(noise)
+        return ((1 - sigma.double()) * sample.double() + sigma.double() * noise.double()).type_as(noise)
 
     @staticmethod
     def _update_latents(
@@ -408,9 +380,7 @@ class Wan22RealtimePipeline:
     ) -> torch.Tensor:
         latents_dtype = latents.dtype
         sigma_t = sigma_t.to(device=latents.device)
-        return (latents.double() - sigma_t.double() * noise_pred.double()).to(
-            latents_dtype
-        )
+        return (latents.double() - sigma_t.double() * noise_pred.double()).to(latents_dtype)
 
     def _predict_noise(
         self,
@@ -479,13 +449,9 @@ class Wan22RealtimePipeline:
         )
 
         if has_video:
-            latents = self._prepare_v2v_latents(
-                input_video_frames, height, width, timesteps, generator
-            )
+            latents = self._prepare_v2v_latents(input_video_frames, height, width, timesteps, generator)
         else:
-            latents = self._prepare_t2v_latents(
-                block_idx, height, width, generator
-            )
+            latents = self._prepare_t2v_latents(block_idx, height, width, generator)
 
         current_start_frame = block_idx * self.num_frames_per_block
         manager = self._setup_kv_cache(session)
@@ -493,9 +459,7 @@ class Wan22RealtimePipeline:
         if block_idx > 0:
             self._recompute_context(session, prompt_embeds, manager)
 
-        step_timestep_ids = torch.argmin(
-            (all_timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1
-        )
+        step_timestep_ids = torch.argmin((all_timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1)
         step_sigmas = sigmas[step_timestep_ids]
 
         for i, t in enumerate(timesteps):
@@ -516,11 +480,7 @@ class Wan22RealtimePipeline:
                     dtype=latents.dtype,
                     generator=generator,
                 )
-                latents = (
-                    self._add_noise(sample, noise, step_sigmas[i + 1])
-                    .unsqueeze(0)
-                    .transpose(1, 2)
-                )
+                latents = self._add_noise(sample, noise, step_sigmas[i + 1]).unsqueeze(0).transpose(1, 2)
 
         session.current_denoised_latents = latents
         session.block_idx += 1
@@ -552,17 +512,11 @@ class Wan22RealtimePipeline:
             self.vae._feat_map = session.decoder_cache
 
         decode_latents = latents.to(device=self.vae.device, dtype=self.vae_dtype)
-        decode_latents = (
-            decode_latents / self._vae_latents_std + self._vae_latents_mean
-        )
+        decode_latents = decode_latents / self._vae_latents_std + self._vae_latents_mean
 
         from contextlib import nullcontext
 
-        ctx = (
-            self.vae._execution_context()
-            if hasattr(self.vae, "_execution_context")
-            else nullcontext()
-        )
+        ctx = self.vae._execution_context() if hasattr(self.vae, "_execution_context") else nullcontext()
 
         with ctx:
             x = self.vae.post_quant_conv(decode_latents)
@@ -599,9 +553,7 @@ class Wan22RealtimePipeline:
 
     def postprocess_decoded(self, video_tensor: torch.Tensor) -> np.ndarray:
         """Convert decoded video tensor to numpy array."""
-        return self.video_processor.postprocess_video(
-            video_tensor, output_type="np"
-        )
+        return self.video_processor.postprocess_video(video_tensor, output_type="np")
 
     @torch.no_grad()
     def generate_block(
@@ -622,8 +574,13 @@ class Wan22RealtimePipeline:
         block_idx = session.block_idx
 
         latents = self.denoise_block(
-            session, prompt, height, width,
-            num_inference_steps, input_video_frames, generator,
+            session,
+            prompt,
+            height,
+            width,
+            num_inference_steps,
+            input_video_frames,
+            generator,
         )
 
         videos = self.decode_block(session, block_idx, latents)
@@ -640,9 +597,7 @@ class Wan22RealtimePipeline:
             new_embeds = self.encode_prompt(prompt)
             interpolated = None
             if session.last_embeds:
-                interpolated = self.interpolate_embeds(
-                    session.last_embeds, [new_embeds]
-                )
+                interpolated = self.interpolate_embeds(session.last_embeds, [new_embeds])
             session.save_prompt_changed(prompt, [new_embeds], interpolated)
 
         embeds = session.get_current_embeds()
@@ -660,11 +615,7 @@ class Wan22RealtimePipeline:
         if len(frames) < self.num_frames_per_block:
             frames = frames + [frames[-1]] * (self.num_frames_per_block - len(frames))
 
-        video = (
-            self.video_processor.preprocess(frames, height, width)
-            .unsqueeze(0)
-            .to(self.vae_dtype)
-        )
+        video = self.video_processor.preprocess(frames, height, width).unsqueeze(0).to(self.vae_dtype)
         init_latents = self._encode_video_frames(video, self.vae_dtype)
         init_latents = init_latents[:, :, -self.num_frames_per_block :]
 
@@ -706,4 +657,3 @@ class Wan22RealtimePipeline:
         start = block_idx * self.num_frames_per_block
         end = start + self.num_frames_per_block
         return all_latents[:, :, start:end].contiguous()
-

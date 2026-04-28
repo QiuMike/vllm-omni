@@ -614,9 +614,7 @@ async def omni_init_app_state(
 
         # Register realtime video handler only if the model supports it
         try:
-            is_supported = await engine_client.collective_rpc(
-                method="realtime_is_supported"
-            )
+            is_supported = await engine_client.collective_rpc(method="realtime_is_supported")
             # Unwrap nested list layers from collective_rpc
             while isinstance(is_supported, list) and len(is_supported) == 1:
                 is_supported = is_supported[0]
@@ -627,6 +625,7 @@ async def omni_init_app_state(
             from vllm_omni.entrypoints.openai.serving_realtime_video import (
                 RealtimeVideoHandler,
             )
+
             state.realtime_video_handler = RealtimeVideoHandler(engine_client)
         else:
             state.realtime_video_handler = None
@@ -1381,11 +1380,13 @@ async def realtime_video_generate(websocket: WebSocket):
         await websocket.accept()
         try:
             from msgpack import packb as _packb
+
             await websocket.send_bytes(
                 _packb({"type": "error", "content": "Realtime video is not available"}, use_bin_type=True)
             )
         except ImportError:
             import json
+
             await websocket.send_text(json.dumps({"type": "error", "content": "Realtime video is not available"}))
         await websocket.close()
         return

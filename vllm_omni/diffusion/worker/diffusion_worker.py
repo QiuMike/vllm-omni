@@ -309,6 +309,7 @@ class DiffusionWorker:
         from vllm_omni.diffusion.models.wan2_2.causal_wan2_2_transformer import (
             CausalWanTransformer3DModel,
         )
+
         return isinstance(pipeline.transformer, CausalWanTransformer3DModel)
 
     def realtime_create_session(self, session_id: str, config: dict) -> bool:
@@ -370,9 +371,7 @@ class DiffusionWorker:
         Block 2+ pipelines: collect VAE(N-1) while denoise(N) runs.
         """
         if not hasattr(self, "_realtime_sessions"):
-            raise RuntimeError(
-                f"No realtime sessions; session {session_id} not found"
-            )
+            raise RuntimeError(f"No realtime sessions; session {session_id} not found")
         if session_id not in self._realtime_sessions:
             raise RuntimeError(f"Realtime session {session_id} not found")
 
@@ -384,10 +383,7 @@ class DiffusionWorker:
 
             from PIL import Image
 
-            input_frames = [
-                Image.open(_io.BytesIO(b)).convert("RGB")
-                for b in video_frames_bytes
-            ]
+            input_frames = [Image.open(_io.BytesIO(b)).convert("RGB") for b in video_frames_bytes]
 
         block_idx = session.block_idx
         is_first_block = block_idx == 0
@@ -417,9 +413,7 @@ class DiffusionWorker:
                     profiler.step()
                 if self.rank == 0:
                     cfg = self._get_session_encode_config(session_id)
-                    return self._encode_all_frames(
-                        video_np, **cfg
-                    )
+                    return self._encode_all_frames(video_np, **cfg)
                 return []
 
             self._sync_and_start_encode(session_id, rt_pipeline)
@@ -438,9 +432,7 @@ class DiffusionWorker:
             if profiler:
                 profiler.step()
 
-            self._launch_async_vae(
-                session_id, rt_pipeline, session, block_idx, latents
-            )
+            self._launch_async_vae(session_id, rt_pipeline, session, block_idx, latents)
 
             return self._collect_encoded_frames(session_id)
 
@@ -453,9 +445,7 @@ class DiffusionWorker:
             }
         return {}
 
-    def _sync_and_start_encode(
-        self, session_id: str, rt_pipeline
-    ) -> None:
+    def _sync_and_start_encode(self, session_id: str, rt_pipeline) -> None:
         """Sync VAE stream and submit CPU encode work to a background thread.
 
         Must be called before denoise_block so that session state written
@@ -481,13 +471,11 @@ class DiffusionWorker:
             if not hasattr(self, "_pending_png_future"):
                 self._pending_png_future: dict = {}
 
-            self._pending_png_future[session_id] = (
-                self._encode_executor.submit(
-                    self._postprocess_and_encode,
-                    rt_pipeline,
-                    video_tensor_cpu,
-                    self._get_session_encode_config(session_id),
-                )
+            self._pending_png_future[session_id] = self._encode_executor.submit(
+                self._postprocess_and_encode,
+                rt_pipeline,
+                video_tensor_cpu,
+                self._get_session_encode_config(session_id),
             )
 
     def _collect_encoded_frames(self, session_id: str) -> list[bytes]:
@@ -500,13 +488,9 @@ class DiffusionWorker:
         return future.result()
 
     @staticmethod
-    def _postprocess_and_encode(
-        rt_pipeline, video_tensor_cpu, encode_cfg: dict | None = None
-    ) -> list[bytes]:
+    def _postprocess_and_encode(rt_pipeline, video_tensor_cpu, encode_cfg: dict | None = None) -> list[bytes]:
         video_np = rt_pipeline.postprocess_decoded(video_tensor_cpu)
-        return DiffusionWorker._encode_all_frames(
-            video_np, **(encode_cfg or {})
-        )
+        return DiffusionWorker._encode_all_frames(video_np, **(encode_cfg or {}))
 
     def _launch_async_vae(
         self,
@@ -561,9 +545,7 @@ class DiffusionWorker:
             pending["stream"].synchronize()
             if self.rank == 0:
                 rt_pipeline = entry[0]
-                video_np = rt_pipeline.postprocess_decoded(
-                    pending["video_tensor"]
-                )
+                video_np = rt_pipeline.postprocess_decoded(pending["video_tensor"])
                 cfg = self._get_session_encode_config(session_id)
                 frames.extend(self._encode_all_frames(video_np, **cfg))
         if profiler:
@@ -592,9 +574,7 @@ class DiffusionWorker:
         return True
 
     @staticmethod
-    def _encode_all_frames(
-        video_np, fmt: str = "jpeg", quality: int = 95
-    ) -> list[bytes]:
+    def _encode_all_frames(video_np, fmt: str = "jpeg", quality: int = 95) -> list[bytes]:
         """Encode all video frames to a list of image bytes."""
         import io as _io
 

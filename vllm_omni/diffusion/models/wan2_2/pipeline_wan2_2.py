@@ -128,9 +128,20 @@ def _extract_common_kwargs(config: dict) -> dict:
     """Extract kwargs shared by both standard and causal transformers."""
     kwargs = {}
     _COMMON_KEYS = [
-        "num_attention_heads", "attention_head_dim", "in_channels", "out_channels",
-        "text_dim", "freq_dim", "ffn_dim", "num_layers", "cross_attn_norm", "eps",
-        "image_dim", "added_kv_proj_dim", "rope_max_seq_len", "pos_embed_seq_len",
+        "num_attention_heads",
+        "attention_head_dim",
+        "in_channels",
+        "out_channels",
+        "text_dim",
+        "freq_dim",
+        "ffn_dim",
+        "num_layers",
+        "cross_attn_norm",
+        "eps",
+        "image_dim",
+        "added_kv_proj_dim",
+        "rope_max_seq_len",
+        "pos_embed_seq_len",
     ]
     for key in _COMMON_KEYS:
         if key in config:
