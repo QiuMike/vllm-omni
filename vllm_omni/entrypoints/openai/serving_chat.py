@@ -837,6 +837,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
+        modality_finished: list[set[str]] = [set() for _ in range(num_choices)]
         num_prompt_tokens = 0
         num_cached_tokens = None
         if self.use_harmony:
@@ -1423,6 +1424,12 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                                 finish_reason_ = "tool_calls"
                             else:
                                 finish_reason_ = output.finish_reason if output.finish_reason else "stop"
+                            # Only emit finish_reason on the last modality to
+                            # comply with OpenAI streaming spec: exactly one
+                            # chunk per choice carries finish_reason="stop".
+                            modality_finished[i].add("text")
+                            if not all(m in modality_finished[i] for m in request.modalities):
+                                finish_reason_ = None
                             choice_data = ChatCompletionResponseStreamChoice(
                                 index=i,
                                 delta=delta_message,
@@ -1460,6 +1467,12 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 elif final_output_type == "audio":
                     role = self.get_chat_request_role(request)
                     choices_data = self._create_audio_choice(omni_res, role, request, stream=True)
+                    # Only emit finish_reason on the last modality to
+                    # comply with OpenAI streaming spec.
+                    for choice in choices_data:
+                        modality_finished[choice.index].add("audio")
+                        if not all(m in modality_finished[choice.index] for m in request.modalities):
+                            choice.finish_reason = None
                     chunk = OmniChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
