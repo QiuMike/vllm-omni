@@ -65,6 +65,9 @@ def pack_msg(msg: dict) -> bytes:
 def unpack_msg(data: bytes) -> dict:
     if msgpack is not None:
         return msgpack.unpackb(data, raw=False)
+    # Binary frame: JPEG starts with 0xff 0xd8
+    if isinstance(data, bytes) and len(data) >= 2 and data[0] == 0xff and data[1] == 0xd8:
+        return {"type": "frame", "content": data}
     import json
 
     return json.loads(data)
