@@ -47,6 +47,19 @@ _FRAME_WAIT_INTERVAL = 0.01
 _VAE_TEMPORAL_COMPRESSION = 4
 
 
+def _decode_json_bytes(obj):
+    """Recursively decode base64-encoded bytes from JSON messages."""
+    import base64
+
+    if isinstance(obj, dict):
+        if "__bytes_b64__" in obj:
+            return base64.b64decode(obj["__bytes_b64__"])
+        return {k: _decode_json_bytes(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_decode_json_bytes(item) for item in obj]
+    return obj
+
+
 class GenerateSession:
     """Session state for a single WebSocket realtime video connection.
 
@@ -294,7 +307,7 @@ class RealtimeVideoHandler:
                 else:
                     import json
 
-                    msg = json.loads(data)
+                    msg = _decode_json_bytes(json.loads(data))
 
                 if not isinstance(msg, dict):
                     continue

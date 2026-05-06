@@ -57,20 +57,41 @@ except ImportError:
 def pack_msg(msg: dict) -> bytes:
     if msgpack is not None:
         return msgpack.packb(msg, use_bin_type=True)
+    import base64
     import json
 
-    return json.dumps(msg).encode()
+    # JSON can't serialize bytes; base64-encode any bytes values
+    def _convert(obj):
+        if isinstance(obj, bytes):
+            return {"__bytes_b64__": base64.b64encode(obj).decode("ascii")}
+        if isinstance(obj, list):
+            return [_convert(item) for item in obj]
+        if isinstance(obj, dict):
+            return {k: _convert(v) for k, v in obj.items()}
+        return obj
+
+    return json.dumps(_convert(msg)).encode()
 
 
 def unpack_msg(data: bytes) -> dict:
     if msgpack is not None:
         return msgpack.unpackb(data, raw=False)
     # Binary frame: JPEG starts with 0xff 0xd8
-    if isinstance(data, bytes) and len(data) >= 2 and data[0] == 0xff and data[1] == 0xd8:
+    if isinstance(data, bytes) and len(data) >= 2 and data[0] == 0xFF and data[1] == 0xD8:
         return {"type": "frame", "content": data}
+    import base64
     import json
 
-    return json.loads(data)
+    def _convert(obj):
+        if isinstance(obj, dict):
+            if "__bytes_b64__" in obj:
+                return base64.b64decode(obj["__bytes_b64__"])
+            return {k: _convert(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_convert(item) for item in obj]
+        return obj
+
+    return _convert(json.loads(data))
 
 
 async def run_t2v_interactive(args):
