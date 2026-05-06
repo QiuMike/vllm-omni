@@ -297,12 +297,10 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             raw_request.state.request_metadata = request_metadata
 
         # Some models will return a list like ["text", None, "audio"], better
-        # to strip None in the list 
+        # to strip None in the list
         engine_output_modalities = [x for x in self.engine_client.output_modalities if x is not None]
         output_modalities = getattr(request, "modalities", engine_output_modalities)
-        request.modalities = (
-            output_modalities if output_modalities is not None else engine_output_modalities
-        )
+        request.modalities = output_modalities if output_modalities is not None else engine_output_modalities
 
         num_inference_steps = None
         cfg_text_scale = None
@@ -1448,7 +1446,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                             # comply with OpenAI streaming spec: exactly one
                             # chunk per choice carries finish_reason="stop".
                             modality_finished[i].add("text")
-                            if modality_seen[i] < set(request.modalities) or not all(m in modality_finished[i] for m in modality_seen[i]):
+                            if modality_seen[i] < set(request.modalities) or not all(
+                                m in modality_finished[i] for m in modality_seen[i]
+                            ):
                                 finish_reason_ = None
                             else:
                                 stop_reason_emitted[i] = True
@@ -1494,7 +1494,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                     for choice in choices_data:
                         if choice.finish_reason is not None:
                             modality_finished[choice.index].add("audio")
-                        if modality_seen[choice.index] < set(request.modalities) or not all(m in modality_finished[choice.index] for m in modality_seen[choice.index]):
+                        if modality_seen[choice.index] < set(request.modalities) or not all(
+                            m in modality_finished[choice.index] for m in modality_seen[choice.index]
+                        ):
                             choice.finish_reason = None
                         else:
                             stop_reason_emitted[choice.index] = True
