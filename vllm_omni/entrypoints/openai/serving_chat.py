@@ -1538,7 +1538,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                         model=model_name,
                     )
                     data = stop_chunk.model_dump_json(exclude_unset=True)
-                    yield f" {data}\n\n"
+                    yield f"data: {data}\n\n"
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
