@@ -30,6 +30,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
+from vllm_omni.diffusion.layers.rope import RotaryEmbeddingWan
 from vllm_omni.diffusion.models.wan2_2.kv_cache import (
     CrossAttentionKVCache,
     SelfAttentionKVCache,
@@ -41,7 +42,6 @@ from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import (
     WanFeedForward,
     WanRotaryPosEmbed,
     WanTimeTextImageEmbedding,
-    apply_rotary_emb_wan,
 )
 
 logger = init_logger(__name__)
@@ -140,9 +140,10 @@ class CausalWanSelfAttention(nn.Module):
         value = value.unflatten(2, (self.local_num_kv_heads, self.head_dim))
 
         # Apply rotary embeddings
+        self.rotary_embedding = RotaryEmbeddingWan(is_neox_style=False, half_head_dim=True)
         freqs_cos, freqs_sin = rotary_emb
-        query = apply_rotary_emb_wan(query, freqs_cos, freqs_sin)
-        key = apply_rotary_emb_wan(key, freqs_cos, freqs_sin)
+        query = self.rotary_embedding(query, freqs_cos, freqs_sin)
+        key = self.rotary_embedding(key, freqs_cos, freqs_sin)
 
         if isinstance(kv_cache, SelfAttentionKVCache):
             out = self._forward_sa_kv_cache(query, key, value, kv_cache, current_start)
@@ -501,6 +502,9 @@ class CausalWanTransformer3DModel(nn.Module):
         # Causal state
         self.block_mask: BlockMask | None = None
         self.gradient_checkpointing = False
+        # ROPE helper
+        self._cached_rope_emb = None
+        self._cached_rope_resolution = None
 
     @property
     def dtype(self) -> torch.dtype:
@@ -616,9 +620,15 @@ class CausalWanTransformer3DModel(nn.Module):
         post_patch_width = width // p_w
 
         # RoPE with start_frame offset for incremental inference
-        rotary_emb = self._compute_rotary_emb(
-            hidden_states, post_patch_num_frames, post_patch_height, post_patch_width, start_frame
-        )
+        current_rope_resolution = (post_patch_num_frames, post_patch_height, post_patch_width)
+        if self._cached_rope_resolution == current_rope_resolution and self._cached_rope_emb is not None:
+            rotary_emb = self._cached_rope_emb
+        else:
+            rotary_emb = self._compute_rotary_emb(
+                hidden_states, post_patch_num_frames, post_patch_height, post_patch_width, start_frame
+            )
+            self._hidden_states_shape = hidden_states.shape
+            self._cached_rope_emb = rotary_emb
 
         # Patch embedding
         hidden_states = self.patch_embedding(hidden_states)
@@ -668,7 +678,8 @@ class CausalWanTransformer3DModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute RoPE with optional frame offset for incremental inference."""
         if start_frame == 0:
-            return self.rope(hidden_states)
+            freqs_cos, freqs_sin = self.rope(hidden_states)
+            return freqs_cos[..., 0::2].to(hidden_states.dtype), freqs_sin[..., 1::2].to(hidden_states.dtype)
 
         head_dim = self.attention_head_dim
         split_sizes = [
@@ -691,7 +702,7 @@ class CausalWanTransformer3DModel(nn.Module):
         cos_emb = torch.cat([freqs_cos_f, freqs_cos_h, freqs_cos_w], dim=-1).reshape(1, ppf * pph * ppw, 1, -1)
         sin_emb = torch.cat([freqs_sin_f, freqs_sin_h, freqs_sin_w], dim=-1).reshape(1, ppf * pph * ppw, 1, -1)
 
-        return cos_emb.to(hidden_states.device), sin_emb.to(hidden_states.device)
+        return cos_emb[..., 0::2].to(hidden_states.device), sin_emb[..., 1::2].to(hidden_states.device)
 
     def _forward_train(
         self,
