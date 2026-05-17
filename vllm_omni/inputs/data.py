@@ -16,7 +16,8 @@ except ImportError:
 
 
 import torch
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensInput, TokensPrompt
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.inputs.engine import TokensInput
 
 
 class OmniTextPrompt(TextPrompt):
@@ -267,6 +268,10 @@ class OmniDiffusionSamplingParams:
     cfg_text_kv_metadata: dict[str, Any] | None = None
     cfg_img_kv_metadata: dict[str, Any] | None = None
     cfg_kv_request_ids: dict[str, str] | None = None
+    cfg_active_branch: str | None = None
+    cfg_branch_roles: list[str] | None = None
+    cfg_branch_past_key_values: dict[str, Any] | None = None
+    cfg_branch_kv_metadata: dict[str, dict[str, Any]] | None = None
 
     # Component modules
     modules: dict[str, Any] = field(default_factory=dict)
