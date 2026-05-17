@@ -5,6 +5,7 @@
 
 import json
 import sys
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -206,6 +207,19 @@ def load_omni_transfer_config(
     if config_dict is None:
         return None
 
+    # Normalize new-schema (top-level ``connectors`` + ``stages``) into the
+    # legacy ``runtime.connectors`` + ``stage_args`` shape the parser reads.
+    if "stages" in config_dict and "stage_args" not in config_dict:
+        normalized: dict[str, Any] = dict(config_dict)
+        runtime = dict(normalized.get("runtime") or {})
+        if "connectors" in normalized and "connectors" not in runtime:
+            runtime["connectors"] = normalized["connectors"]
+        if "edges" in normalized and "edges" not in runtime:
+            runtime["edges"] = normalized["edges"]
+        normalized["runtime"] = runtime
+        normalized["stage_args"] = normalized["stages"]
+        config_dict = normalized
+
     # Parse connectors
     connectors = {}
     runtime_config = config_dict.get("runtime", {})
@@ -390,7 +404,16 @@ def build_stage_connectors(
     connectors_config: dict[str, Any],
     purpose: str = "request_forwarding",
 ) -> dict[tuple[str, str], Any] | None:
-    """Instantiate OmniConnectors for a stage based on config."""
+    """Instantiate OmniConnectors for a stage based on config.
+
+    Deprecated: prefer ``get_stage_connector_config`` plus the unified
+    connector factory. Kept as a thin shim so legacy callers keep working.
+    """
+    warnings.warn(
+        "build_stage_connectors is deprecated; use get_stage_connector_config and OmniConnectorFactory instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if not connectors_config:
         return {}
 

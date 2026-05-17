@@ -58,6 +58,28 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Enable CPU offloading for diffusion models.",
     )
+    parser.add_argument(
+        "--enable-layerwise-offload",
+        action="store_true",
+        help="Enable layerwise (blockwise) offloading on DiT modules.",
+    )
+    parser.add_argument(
+        "--use-hsdp",
+        action="store_true",
+        help="Enable HSDP for DreamID-Omni fused transformer blocks.",
+    )
+    parser.add_argument(
+        "--hsdp-shard-size",
+        type=int,
+        default=1,
+        help="Number of GPUs used for HSDP sharding when HSDP is enabled.",
+    )
+    parser.add_argument(
+        "--hsdp-replicate-size",
+        type=int,
+        default=1,
+        help="Number of HSDP replica groups. Default 1 means pure sharding.",
+    )
     return parser.parse_args()
 
 
@@ -119,6 +141,9 @@ def main() -> None:
 
     parallel_config = DiffusionParallelConfig(
         cfg_parallel_size=args.cfg_parallel_size,
+        use_hsdp=args.use_hsdp,
+        hsdp_shard_size=args.hsdp_shard_size,
+        hsdp_replicate_size=args.hsdp_replicate_size,
     )
 
     omni = Omni(
@@ -126,6 +151,7 @@ def main() -> None:
         parallel_config=parallel_config,
         model_type=args.model_type,
         enable_cpu_offload=args.enable_cpu_offload,
+        enable_layerwise_offload=args.enable_layerwise_offload,
     )
     start = time.perf_counter()
     outputs = omni.generate(prompt, sampling_params)
