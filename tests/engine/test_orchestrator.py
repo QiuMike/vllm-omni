@@ -964,6 +964,7 @@ async def test_handle_streaming_update_passes_prompt_text_to_stage_pool() -> Non
 
     pool = RecordingPool()
     orchestrator = object.__new__(Orchestrator)
+    orchestrator.async_chunk = False
     orchestrator.request_states = {
         "req-stream": OrchestratorRequestState(
             request_id="req-stream",
@@ -1052,7 +1053,7 @@ async def test_stage_pool_abort_requests_logs_when_binding_is_missing(caplog) ->
         target_logger.setLevel(prev_level)
 
     assert not stage0.abort_calls
-    assert "abort: no binding for req=missing-req in stage-0" in caplog.text
+    assert "abort: no live binding for req=missing-req in stage-0" in caplog.text
 
 
 @pytest.mark.asyncio
