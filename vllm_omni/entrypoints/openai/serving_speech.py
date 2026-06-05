@@ -2144,7 +2144,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         sample_rate=sample_rate_val,
                         response_format="pcm",
                         speed=1.0,
-                        stream_format="audio",
                         base64_encode=False,
                     )
                     if first_audio_chunk_s is None:
@@ -3170,7 +3169,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 sample_rate=sample_rate,
                 response_format=request.response_format or "wav",
                 speed=request.speed or 1.0,
-                stream_format=request.stream_format,
                 base64_encode=base64_encode,
             )
             audio_response: AudioResponse = self.create_audio(audio_obj)
@@ -3283,7 +3281,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 sample_rate=sample_rate,
                 response_format=request.response_format or "wav",
                 speed=request.speed or 1.0,
-                stream_format=request.stream_format,
                 base64_encode=False,
             )
             audio_response: AudioResponse = self.create_audio(audio_obj)
@@ -3334,7 +3331,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         - ref_text: Transcript of reference audio (Base task)
         - x_vector_only_mode: Use speaker embedding only (Base task)
 
-        Streaming is supported via stream=True with response_format='pcm' or 'wav'.
+        Streaming is supported via request.stream_format equals to "audio"
+        with response_format='pcm' or 'wav'. we keep request.stream to make
+        it compact with old versions.
         Each Code2Wav chunk is yielded as raw audio bytes as soon as it is decoded.
         For WAV format, a header with placeholder size values is emitted first.
         """
@@ -3354,7 +3353,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             )
 
         try:
-            if request.stream:
+            if request.stream or request.stream_format == "audio":
                 # Determine response format and media type for streaming
                 response_format = (request.response_format or "wav").lower()
 

@@ -168,18 +168,16 @@ class OpenAICreateSpeechRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_streaming_constraints(self) -> "OpenAICreateSpeechRequest":
-        if self.stream:
+        if self.stream or self.stream_format == "audio":
             if self.response_format not in ("pcm", "wav"):
                 raise ValueError(
-                    "Streaming (stream=true) requires response_format='pcm' or 'wav'. "
+                    "Streaming (stream=true or stream_format=audio) requires response_format='pcm' or 'wav'. "
                     f"Got response_format='{self.response_format}'."
                 )
             if self.speed is None:
                 self.speed = 1.0
             elif self.speed != 1.0:
-                raise ValueError(
-                    "Speed adjustment is not supported when streaming (stream=true). Set speed=1.0 or omit it."
-                )
+                raise ValueError("Speed adjustment is not supported when streaming. Set speed=1.0 or omit it.")
         return self
 
 
@@ -235,7 +233,6 @@ class CreateAudio(BaseModel):
     sample_rate: int = 24000
     response_format: str = "wav"
     speed: float = 1.0
-    stream_format: Literal["sse", "audio"] | None = "audio"
     base64_encode: bool = True
 
     class Config:
