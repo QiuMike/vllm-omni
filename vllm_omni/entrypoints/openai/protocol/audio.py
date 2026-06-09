@@ -28,7 +28,7 @@ class OpenAICreateSpeechRequest(BaseModel):
         ge=0.25,
         le=4.0,
     )
-    stream_format: Literal["sse", "audio"] | None = "audio"
+    stream_format: Literal["sse", "audio"] | None = None
     stream: bool = Field(
         default=False,
         description=(
@@ -194,7 +194,7 @@ class OpenAICreateAudioGenerateRequest(BaseModel):
         ge=0.25,
         le=4.0,
     )
-    stream_format: Literal["sse", "audio"] | None = "audio"
+    stream_format: Literal["sse", "audio"] | None = None
     audio_length: float | None = Field(
         default=None,
         description="Audio length in seconds",
